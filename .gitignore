@@ -1,0 +1,14 @@
+# virtual environment
+.venv/
+
+# python cache
+__pycache__/
+*.pyc
+
+# env files
+.env
+uv.lock
+
+# OS / editor
+.DS_Store
+
