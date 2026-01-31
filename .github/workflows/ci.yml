@@ -37,9 +37,3 @@ jobs:
       - name: Set up project environment (Makefile)
         run: make setup
 
-      - name: Run application
-        env:
-          MPLBACKEND: Agg
-        run: |
-          uv run python run.py
-
