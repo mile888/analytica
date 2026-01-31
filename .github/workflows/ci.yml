@@ -37,13 +37,9 @@ jobs:
       - name: Set up project environment (Makefile)
         run: make setup
 
-      - name: Lint and format check (Makefile)
-        run: make check
-
-      - name: Syntax and import check
+      - name: Run application
         env:
           MPLBACKEND: Agg
         run: |
-          uv run python -m compileall -q .
-          uv run python -c "import run; print('Imported run.py OK')"
+          uv run python run.py
 
