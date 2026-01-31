@@ -7,7 +7,6 @@ __pycache__/
 
 # env files
 .env
-uv.lock
 
 # OS / editor
 .DS_Store

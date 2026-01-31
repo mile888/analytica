@@ -1,0 +1,24 @@
+{
+  "python.terminal.activateEnvironment":true,
+  "python.languageServer": "None",
+  "python.analysis.typeCheckingMode": "standard",
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.extraPaths": ["."],
+
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+
+  "pylint.args": [
+    "--disable=C0114,C0115,C0116",
+    "--max-line-length=100"
+  ],
+
+  "isort.args": ["--profile", "black", "--line-length", "100"],
+  "black-formatter.args": [
+    "--line-length",
+    "100"
+  ],
+}
