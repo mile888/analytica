@@ -1,0 +1,22 @@
+defaults:
+  provider: gemini
+  model: gemini-2.5-flash
+  # provider: ollama
+  # model: llama3.2:3b
+  temperature: 1.0
+  max_tokens: null
+  timeout: null
+  max_retries: 2
+
+providers:
+  gemini:
+    api_key_env: GEMINI_API_KEY
+
+  openai:
+    api_key_env: OPEN_API_TOKEN
+    model: gpt-4o-mini
+
+  ollama:
+    base_url: "http://localhost:11434"
+    model: llama3.2:3b
+

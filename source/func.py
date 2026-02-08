@@ -2,21 +2,61 @@ from typing import Any, Dict, Optional
 import pandas as pd
 # from langchain_openai import ChatOpenAI
 # from langchain_ollama import ChatOllama
-from langchain_google_genai import ChatGoogleGenerativeAI
-
+# from langchain_google_genai import ChatGoogleGenerativeAI
+from source.llm_config import load_llm_config, resolve_api_key
 from dotenv import load_dotenv
 
 load_dotenv()
 
-
 def make_llm():
-    return ChatGoogleGenerativeAI(
-                                    model="gemini-2.5-flash",
-                                    temperature=1.0, 
-                                    max_tokens=None,
-                                    timeout=None,
-                                    max_retries=2,
-                                )
+    cfg = load_llm_config()
+    d = cfg.defaults
+    provider = d.provider
+
+    p_cfg = cfg.providers.get(provider, {}) or {}
+    model = p_cfg.get("model") or d.model
+
+    if provider == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        api_key = resolve_api_key(cfg.providers, "gemini")
+        if not api_key:
+            raise ValueError("Missing GEMINI_API_KEY. Put it into .env")
+
+        return ChatGoogleGenerativeAI(
+            model=model,
+            temperature=d.temperature,
+            max_tokens=d.max_tokens,
+            timeout=d.timeout,
+            max_retries=d.max_retries,
+            api_key=api_key,
+        )
+
+    if provider == "openai":
+        from langchain_openai import ChatOpenAI
+        api_key = resolve_api_key(cfg.providers, "openai")
+        if not api_key:
+            raise ValueError("Missing OPEN_API_TOKEN (OpenAI). Put it into .env")
+
+        return ChatOpenAI(
+            model=model,
+            temperature=d.temperature,
+            max_tokens=d.max_tokens,
+            timeout=d.timeout,
+            max_retries=d.max_retries,
+            api_key=api_key,
+        )
+
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+        base_url = (cfg.providers.get("ollama", {}) or {}).get("base_url", "http://localhost:11434")
+        return ChatOllama(
+            model=model,
+            temperature=d.temperature,
+            base_url=base_url,
+        )
+
+    raise ValueError(f"Unsupported provider: {provider}")
+
 
 
 
@@ -40,11 +80,6 @@ def preview_result(result: Any, max_chars: int = 800) -> str:
         return f"<preview_error: {e}>"
 
 def _describe_matplotlib_figure(fig: Any, max_bars: int = 10, max_chars: int = 800) -> str:
-    """
-    Пытаемся извлечь семантическое описание графика:
-    title/xlabel/ylabel + бары (label -> height), если это bar chart.
-    Работает без сохранения в файл.
-    """
     try:
         axes = getattr(fig, "axes", None)
         if not axes:
@@ -310,9 +345,9 @@ def safe_exec_pandas(code: str, df: pd.DataFrame) -> tuple[Any, Optional[str]]:
 
     env: Dict[str, Any] = {"df": df, "pd": pd}
 
-    
+
     try:
-        import matplotlib.pyplot as plt  
+        import matplotlib.pyplot as plt
         env["plt"] = plt
     except Exception:
         env["plt"] = None
