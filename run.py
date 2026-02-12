@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 if __name__ == "__main__":
     df = pd.read_csv("data/train.csv")
-    query = '/bar x=Category y=Sales agg=sum top=5 title=Top-5_categories_by_sales'
+    query = "Какие метрики и срезы нужны, чтобы понять падение продаж по категориям?"
     out = run_once(df, query)
 
     print("=== FINAL ANSWER ===")
