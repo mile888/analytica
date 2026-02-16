@@ -1,59 +1,115 @@
-from typing import List, Optional
+from typing import List, Optional, Any
+import json
+
 import pandas as pd
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.messages import BaseMessage
 from langgraph.graph import StateGraph, END
 
+from source.prompts import (
+    ROUTER_PROMPT,
+    BUSINESS_PROMPT,
+    PLANNER_PROMPT,
+    CODEGEN_PROMPT,
+    CRITIC_PROMPT,
+    REPORTER_PROMPT,
+)
 
-from source.prompts import (PLANNER_PROMPT, 
-                            CODEGEN_PROMPT, 
-                            CRITIC_PROMPT, 
-                            REPORTER_PROMPT)
-
-from source.func import (make_llm,
-                        df_schema_text, 
-                        extract_code_block, 
-                        safe_exec_pandas, 
-                        preview_result_and_facts,
-                        _is_bar_command,
-                        _bar_codegen)
+from source.func import (
+    make_llm,
+    detect_engine,
+    ensure_engine_table,
+    df_schema_text,
+    extract_code_block,
+    safe_exec,
+    preview_result_and_facts,
+    _is_bar_command,
+    _bar_codegen,
+)
 
 from source.state import AgentState
 
 
+def business_or_data_node(state: AgentState) -> AgentState:
+    query = state["query"]
+
+    llm = make_llm("router")
+    msg = llm.invoke(ROUTER_PROMPT.format_messages(query=query))
+
+    needs_data = True
+    use_case = "data_analytics"
+    reason = ""
+
+    raw = (msg.content or "").strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        q = query.lower()
+        needs_data = any(k in q for k in ["топ", "sum", "сумм", "средн", "avg", "mean", "график", "bar", "таблиц", "посчитай", "сколько", "корреляц", "доля"])
+        use_case = "data_analytics" if needs_data else "business_analytics"
+        reason = "heuristic"
+    else:
+        needs_data = bool(data.get("needs_data", True))
+        use_case = data.get("use_case", "data_analytics")
+        reason = data.get("reason", "")
+
+    if needs_data:
+        eng = detect_engine(state.get("df"), state.get("engine"))
+        table = ensure_engine_table(state.get("df"), eng)
+        schema = df_schema_text(table, eng)
+        return {"needs_data": True, "use_case": "data_analytics", "engine": eng, "df": table, "schema": schema}
+
+    return {"needs_data": False, "use_case": "business_analytics", "engine": "pandas", "schema": ""}
+
+
+def route_after_router(state: AgentState) -> str:
+    return "planner" if state.get("needs_data") else "business"
+
+
+def business_node(state: AgentState) -> AgentState:
+    llm = make_llm("reporter")
+    msg = llm.invoke(BUSINESS_PROMPT.format_messages(query=state["query"]))
+    return {"final_answer": msg.content}
+
+
 def planner_node(state: AgentState) -> AgentState:
-    llm = make_llm()
+    llm = make_llm("planner")
     history_text = "\n".join(
         [f"{m.type}: {getattr(m, 'content', '')}" for m in state.get("chat_history", [])][-6:]
     ) or "(пусто)"
-    schema = df_schema_text(state["df"])
+    schema = state.get("schema") or df_schema_text(state["df"], state.get("engine", "pandas"))
     plan_msg = llm.invoke(PLANNER_PROMPT.format_messages(
         query=state["query"],
         history=history_text,
         schema=schema,
+        engine=state.get("engine", "pandas"),
     ))
-    return {"plan": plan_msg.content}
+    return {"plan": plan_msg.content, "schema": schema}
+
 
 def codegen_node(state: AgentState) -> AgentState:
     if _is_bar_command(state["query"]):
         code = _bar_codegen(state["query"])
         return {"code": code}
 
-    llm = make_llm()
-    schema = df_schema_text(state["df"])
+    llm = make_llm("codegen")
+    schema = state.get("schema") or df_schema_text(state["df"], state.get("engine", "pandas"))
     critic_fb = state.get("critic_feedback", "")
     msg = llm.invoke(CODEGEN_PROMPT.format_messages(
         query=state["query"],
-        plan=state["plan"],
+        plan=state.get("plan", ""),
         critic_feedback=critic_fb,
         schema=schema,
+        engine=state.get("engine", "pandas"),
     ))
     code = extract_code_block(msg.content)
     if not code.strip():
-        code = msg.content.strip()
-    return {"code": code}
+        code = (msg.content or "").strip()
+    return {"code": code, "schema": schema}
+
 
 def exec_node(state: AgentState) -> AgentState:
-    result, err = safe_exec_pandas(state["code"], state["df"])
+    engine = state.get("engine", "pandas")
+    result, err = safe_exec(state["code"], state["df"], engine)
     kind, rp, facts = preview_result_and_facts(result, err)
     return {
         "result": result,
@@ -65,12 +121,11 @@ def exec_node(state: AgentState) -> AgentState:
 
 
 def critic_node(state: AgentState) -> AgentState:
-    import json
-    llm = make_llm()
+    llm = make_llm("critic")
     msg = llm.invoke(CRITIC_PROMPT.format_messages(
         query=state["query"],
-        plan=state["plan"],
-        code=state["code"],
+        plan=state.get("plan", ""),
+        code=state.get("code", ""),
         result_kind=state.get("result_kind", "scalar"),
         result_facts=state.get("result_facts", state.get("result_preview", "")),
         exec_error=state.get("exec_error", None),
@@ -110,11 +165,12 @@ def critic_node(state: AgentState) -> AgentState:
 
     return {"critic_verdict": verdict, "critic_feedback": feedback}
 
+
 def reporter_node(state: AgentState) -> AgentState:
-    llm = make_llm()
+    llm = make_llm("reporter")
     msg = llm.invoke(REPORTER_PROMPT.format_messages(
         query=state["query"],
-        plan=state["plan"],
+        plan=state.get("plan", ""),
         result_kind=state.get("result_kind", "scalar"),
         result_facts=state.get("result_facts", state.get("result_preview", "")),
     ))
@@ -139,9 +195,11 @@ def route_after_critic(state: AgentState) -> str:
     return "codegen"
 
 
-
 def build_graph():
     g = StateGraph(AgentState)
+
+    g.add_node("router", business_or_data_node)
+    g.add_node("business", business_node)
 
     g.add_node("planner", planner_node)
     g.add_node("codegen", codegen_node)
@@ -150,7 +208,15 @@ def build_graph():
     g.add_node("attempt_guard", attempt_guard_node)
     g.add_node("reporter", reporter_node)
 
-    g.set_entry_point("planner")
+    g.set_entry_point("router")
+
+    g.add_conditional_edges(
+        "router",
+        route_after_router,
+        {"planner": "planner", "business": "business"},
+    )
+
+    g.add_edge("business", END)
 
     g.add_edge("planner", "codegen")
     g.add_edge("codegen", "exec")
@@ -160,18 +226,19 @@ def build_graph():
     g.add_conditional_edges(
         "attempt_guard",
         route_after_critic,
-        {"codegen": "codegen", "reporter": "reporter"}
+        {"codegen": "codegen", "reporter": "reporter"},
     )
 
     g.add_edge("reporter", END)
     return g.compile()
 
 
-def run_once(df: pd.DataFrame, query: str, chat_history: Optional[List[BaseMessage]] = None):
+def run_once(df: Any, query: str, chat_history: Optional[List[BaseMessage]] = None, engine: str = "auto"):
     app = build_graph()
     init_state: AgentState = {
         "query": query,
         "df": df,
+        "engine": engine,
         "chat_history": chat_history or [],
         "attempts": 0,
         "max_attempts": 2,
@@ -186,4 +253,7 @@ def run_once(df: pd.DataFrame, query: str, chat_history: Optional[List[BaseMessa
         "critic_verdict": out.get("critic_verdict", ""),
         "critic_feedback": out.get("critic_feedback", ""),
         "exec_error": out.get("exec_error", None),
+        "use_case": out.get("use_case", ""),
+        "engine": out.get("engine", ""),
+        "needs_data": out.get("needs_data", None),
     }

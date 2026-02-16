@@ -1,12 +1,19 @@
-import pandas as pd
 from typing import Any, List, Optional, Literal, TypedDict
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.messages import BaseMessage
+
+EngineName = Literal["pandas", "polars", "spark"]
+UseCase = Literal["data_analytics", "business_analytics"]
 
 
 class AgentState(TypedDict, total=False):
     query: str
-    df: pd.DataFrame
+    df: Any
     chat_history: List[BaseMessage]
+
+    use_case: UseCase
+    needs_data: bool
+    engine: EngineName
+    schema: str
 
     plan: str
     code: str
