@@ -1,64 +1,9 @@
 from typing import Any, Dict, Optional
 import pandas as pd
-# from langchain_openai import ChatOpenAI
-# from langchain_ollama import ChatOllama
-# from langchain_google_genai import ChatGoogleGenerativeAI
-from source.llm_config import load_llm_config, resolve_api_key
 from dotenv import load_dotenv
+from source.llm.factory import make_llm
 
 load_dotenv()
-
-def make_llm():
-    cfg = load_llm_config()
-    d = cfg.defaults
-    provider = d.provider
-
-    p_cfg = cfg.providers.get(provider, {}) or {}
-    model = p_cfg.get("model") or d.model
-
-    if provider == "gemini":
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        api_key = resolve_api_key(cfg.providers, "gemini")
-        if not api_key:
-            raise ValueError("Missing GEMINI_API_KEY. Put it into .env")
-
-        return ChatGoogleGenerativeAI(
-            model=model,
-            temperature=d.temperature,
-            max_tokens=d.max_tokens,
-            timeout=d.timeout,
-            max_retries=d.max_retries,
-            api_key=api_key,
-        )
-
-    if provider == "openai":
-        from langchain_openai import ChatOpenAI
-        api_key = resolve_api_key(cfg.providers, "openai")
-        if not api_key:
-            raise ValueError("Missing OPEN_API_TOKEN (OpenAI). Put it into .env")
-
-        return ChatOpenAI(
-            model=model,
-            temperature=d.temperature,
-            max_tokens=d.max_tokens,
-            timeout=d.timeout,
-            max_retries=d.max_retries,
-            api_key=api_key,
-        )
-
-    if provider == "ollama":
-        from langchain_ollama import ChatOllama
-        base_url = (cfg.providers.get("ollama", {}) or {}).get("base_url", "http://localhost:11434")
-        return ChatOllama(
-            model=model,
-            temperature=d.temperature,
-            base_url=base_url,
-        )
-
-    raise ValueError(f"Unsupported provider: {provider}")
-
-
-
 
 def df_schema_text(df: pd.DataFrame) -> str:
     dtypes = {c: str(t) for c, t in df.dtypes.items()}
