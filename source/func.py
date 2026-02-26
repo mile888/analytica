@@ -1,24 +1,9 @@
 from typing import Any, Dict, Optional
 import pandas as pd
-# from langchain_openai import ChatOpenAI
-# from langchain_ollama import ChatOllama
-from langchain_google_genai import ChatGoogleGenerativeAI
-
 from dotenv import load_dotenv
+from source.llm.factory import make_llm
 
 load_dotenv()
-
-
-def make_llm():
-    return ChatGoogleGenerativeAI(
-                                    model="gemini-2.5-flash",
-                                    temperature=1.0, 
-                                    max_tokens=None,
-                                    timeout=None,
-                                    max_retries=2,
-                                )
-
-
 
 def df_schema_text(df: pd.DataFrame) -> str:
     dtypes = {c: str(t) for c, t in df.dtypes.items()}
@@ -40,11 +25,6 @@ def preview_result(result: Any, max_chars: int = 800) -> str:
         return f"<preview_error: {e}>"
 
 def _describe_matplotlib_figure(fig: Any, max_bars: int = 10, max_chars: int = 800) -> str:
-    """
-    Пытаемся извлечь семантическое описание графика:
-    title/xlabel/ylabel + бары (label -> height), если это bar chart.
-    Работает без сохранения в файл.
-    """
     try:
         axes = getattr(fig, "axes", None)
         if not axes:
@@ -310,9 +290,9 @@ def safe_exec_pandas(code: str, df: pd.DataFrame) -> tuple[Any, Optional[str]]:
 
     env: Dict[str, Any] = {"df": df, "pd": pd}
 
-    
+
     try:
-        import matplotlib.pyplot as plt  
+        import matplotlib.pyplot as plt
         env["plt"] = plt
     except Exception:
         env["plt"] = None
