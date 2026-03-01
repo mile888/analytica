@@ -1,9 +1,6 @@
 from typing import Any, Dict, Optional
 import pandas as pd
-from dotenv import load_dotenv
 from source.llm.factory import make_llm
-
-load_dotenv()
 
 def df_schema_text(df: pd.DataFrame) -> str:
     dtypes = {c: str(t) for c, t in df.dtypes.items()}

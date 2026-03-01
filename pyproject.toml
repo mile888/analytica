@@ -14,4 +14,6 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "langchain-ollama>=0.2.0",
     "langchain-google-genai>=4.2.0",
+    "fastapi>=0.135.0",
+    "uvicorn>=0.41.0",
 ]

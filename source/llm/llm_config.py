@@ -31,7 +31,7 @@ class LLMConfig(BaseModel):
         return self
 
 
-def load_llm_config(path: str = "llm_config.yaml") -> LLMConfig:
+def load_llm_config(path: str = "config.yaml") -> LLMConfig:
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     return LLMConfig(**raw)
