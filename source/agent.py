@@ -67,19 +67,25 @@ def route_after_router(state: AgentState) -> str:
 
 def business_node(state: AgentState) -> AgentState:
     llm = make_llm("reporter")
-    msg = llm.invoke(BUSINESS_PROMPT.format_messages(query=state["query"]))
+    history_text = "\n".join(
+        [f"{m.type}: {getattr(m, 'content', '')}" for m in state.get("messages", [])][-6:]
+    ) or "(пусто)"
+    msg = llm.invoke(BUSINESS_PROMPT.format_messages(
+        query=state["query"],
+        messages=history_text,
+    ))
     return {"final_answer": msg.content}
 
 
 def planner_node(state: AgentState) -> AgentState:
     llm = make_llm("planner")
     history_text = "\n".join(
-        [f"{m.type}: {getattr(m, 'content', '')}" for m in state.get("chat_history", [])][-6:]
+        [f"{m.type}: {getattr(m, 'content', '')}" for m in state.get("messages", [])][-6:]
     ) or "(пусто)"
     schema = state.get("schema") or df_schema_text(state["df"], state.get("engine", "pandas"))
     plan_msg = llm.invoke(PLANNER_PROMPT.format_messages(
         query=state["query"],
-        history=history_text,
+        messages=history_text,
         schema=schema,
         engine=state.get("engine", "pandas"),
     ))
@@ -233,13 +239,13 @@ def build_graph():
     return g.compile()
 
 
-def run_once(df: Any, query: str, chat_history: Optional[List[BaseMessage]] = None, engine: str = "auto"):
+def run_once(df: Any, query: str, messages: Optional[List[BaseMessage]] = None, engine: str = "auto"):
     app = build_graph()
     init_state: AgentState = {
         "query": query,
         "df": df,
         "engine": engine,
-        "chat_history": chat_history or [],
+        "messages": messages or [],
         "attempts": 0,
         "max_attempts": 2,
         "critic_feedback": "",

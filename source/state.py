@@ -1,5 +1,7 @@
-from typing import Any, List, Optional, Literal, TypedDict
+from typing import Annotated, Any, List, Optional, Literal, TypedDict
+
 from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 EngineName = Literal["pandas", "polars", "spark"]
 UseCase = Literal["data_analytics", "business_analytics"]
@@ -8,7 +10,7 @@ UseCase = Literal["data_analytics", "business_analytics"]
 class AgentState(TypedDict, total=False):
     query: str
     df: Any
-    chat_history: List[BaseMessage]
+    messages: Annotated[list[BaseMessage], add_messages]
 
     use_case: UseCase
     needs_data: bool
