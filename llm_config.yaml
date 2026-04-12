@@ -1,0 +1,38 @@
+defaults:
+  provider: gemini
+  model: gemini-2.5-flash
+  engine: pandas          # pandas | polars | spark
+  temperature: 1.0
+  max_tokens: null
+  timeout: null
+  max_retries: 2
+
+providers:
+  gemini:
+    api_key_env: GEMINI_API_KEY
+
+  openai:
+    api_key_env: OPEN_API_TOKEN
+    model: gpt-4o-mini
+
+  ollama:
+    base_url: "http://localhost:11434"
+    model: llama3.2:3b
+
+# Per-node overrides (merged on top of defaults).
+# Each node can override: temperature, model, provider.
+# Example: use a cheaper/faster model for the router, a stronger one for codegen.
+node_overrides:
+  router:
+    temperature: 0.2
+    # model: gemini-2.0-flash       # uncomment to use a faster model for routing
+  planner:
+    temperature: 0.7
+  codegen:
+    temperature: 0.2
+    # model: gpt-4o                 # uncomment to use a different model for code generation
+    # provider: openai              # uncomment to switch provider for this node only
+  critic:
+    temperature: 0.2
+  reporter:
+    temperature: 0.4

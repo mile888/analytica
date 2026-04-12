@@ -1,33 +1,63 @@
+"""
+Analytics agent graph — clean pipeline architecture.
+
+Flow:
+  router → (data path)    → planner → codegen → exec → route_after_exec
+                                                         ├─ exec error + retries left → codegen
+                                                         ├─ exec error + exhausted    → reporter
+                                                         └─ success                   → critic
+                                                                                        ├─ OK    → reporter
+                                                                                        └─ RETRY → codegen
+         → (business path) → business → END
+"""
 from typing import List, Optional, Any
 import json
 
 import pandas as pd
 from langchain_core.messages import BaseMessage
+from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
 
-from source.prompts import (
-    ROUTER_PROMPT,
-    BUSINESS_PROMPT,
-    PLANNER_PROMPT,
-    CODEGEN_PROMPT,
-    CRITIC_PROMPT,
-    REPORTER_PROMPT,
-)
+from source.prompts import (ROUTER_PROMPT, BUSINESS_PROMPT, PLANNER_PROMPT, CODEGEN_PROMPT, CRITIC_PROMPT, REPORTER_PROMPT)
 
 from source.func import (
-    make_llm,
     detect_engine,
-    ensure_engine_table,
-    df_schema_text,
     extract_code_block,
     safe_exec,
     preview_result_and_facts,
     _is_bar_command,
     _bar_codegen,
 )
+from source.llm.factory import make_llm
+from source.engine import create_engine
 
 from source.state import AgentState
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Utility
+# ═══════════════════════════════════════════════════════════════════════
+
+def _parse_json_loose(text: str) -> Optional[dict]:
+    """Try to parse JSON from text — first raw, then find first {...} block."""
+    text = (text or "").strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except Exception:
+            pass
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Nodes
+# ═══════════════════════════════════════════════════════════════════════
 
 def business_or_data_node(state: AgentState) -> AgentState:
     query = state["query"]
@@ -35,28 +65,19 @@ def business_or_data_node(state: AgentState) -> AgentState:
     llm = make_llm("router")
     msg = llm.invoke(ROUTER_PROMPT.format_messages(query=query))
 
-    needs_data = True
-    use_case = "data_analytics"
-    reason = ""
-
-    raw = (msg.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except Exception:
-        q = query.lower()
-        needs_data = any(k in q for k in ["топ", "sum", "сумм", "средн", "avg", "mean", "график", "bar", "таблиц", "посчитай", "сколько", "корреляц", "доля"])
-        use_case = "data_analytics" if needs_data else "business_analytics"
-        reason = "heuristic"
-    else:
+    data = _parse_json_loose(msg.content)
+    if data:
         needs_data = bool(data.get("needs_data", True))
-        use_case = data.get("use_case", "data_analytics")
-        reason = data.get("reason", "")
+    else:
+        # If router fails to produce valid JSON, default to data path (safer)
+        needs_data = True
 
     if needs_data:
-        eng = detect_engine(state.get("df"), state.get("engine"))
-        table = ensure_engine_table(state.get("df"), eng)
-        schema = df_schema_text(table, eng)
-        return {"needs_data": True, "use_case": "data_analytics", "engine": eng, "df": table, "schema": schema}
+        eng_name = detect_engine(state.get("df"), state.get("engine"))
+        eng = create_engine(eng_name)
+        table = eng.ensure_table(state.get("df"))
+        schema = eng.schema_text(table)
+        return {"needs_data": True, "use_case": "data_analytics", "engine": eng_name, "df": table, "schema": schema}
 
     return {"needs_data": False, "use_case": "business_analytics", "engine": "pandas", "schema": ""}
 
@@ -82,7 +103,7 @@ def planner_node(state: AgentState) -> AgentState:
     history_text = "\n".join(
         [f"{m.type}: {getattr(m, 'content', '')}" for m in state.get("messages", [])][-6:]
     ) or "(пусто)"
-    schema = state.get("schema") or df_schema_text(state["df"], state.get("engine", "pandas"))
+    schema = state.get("schema") or create_engine(state.get("engine", "pandas")).schema_text(state["df"])
     plan_msg = llm.invoke(PLANNER_PROMPT.format_messages(
         query=state["query"],
         messages=history_text,
@@ -95,15 +116,15 @@ def planner_node(state: AgentState) -> AgentState:
 def codegen_node(state: AgentState) -> AgentState:
     if _is_bar_command(state["query"]):
         code = _bar_codegen(state["query"])
-        return {"code": code}
+        return {"code": code, "schema": state.get("schema") or ""}
 
     llm = make_llm("codegen")
-    schema = state.get("schema") or df_schema_text(state["df"], state.get("engine", "pandas"))
-    critic_fb = state.get("critic_feedback", "")
+    schema = state.get("schema") or create_engine(state.get("engine", "pandas")).schema_text(state["df"])
     msg = llm.invoke(CODEGEN_PROMPT.format_messages(
         query=state["query"],
         plan=state.get("plan", ""),
-        critic_feedback=critic_fb,
+        critic_feedback=state.get("critic_feedback", ""),
+        exec_error=state.get("exec_error") or "",
         schema=schema,
         engine=state.get("engine", "pandas"),
     ))
@@ -116,14 +137,35 @@ def codegen_node(state: AgentState) -> AgentState:
 def exec_node(state: AgentState) -> AgentState:
     engine = state.get("engine", "pandas")
     result, err = safe_exec(state["code"], state["df"], engine)
-    kind, rp, facts = preview_result_and_facts(result, err)
+    kind, rp, facts, b64 = preview_result_and_facts(result, err)
+
+    attempts = int(state.get("attempts", 0)) + 1
+
     return {
         "result": result,
         "exec_error": err,
         "result_kind": kind,
         "result_preview": rp,
         "result_facts": facts,
+        "result_base64": b64,
+        "attempts": attempts,
     }
+
+
+def route_after_exec(state: AgentState) -> str:
+    """Route based on execution outcome.
+
+    - exec error + retries left → codegen (direct retry with error context)
+    - exec error + exhausted    → reporter (give up gracefully)
+    - success                   → critic  (quality check)
+    """
+    if state.get("exec_error"):
+        attempts = int(state.get("attempts", 0))
+        max_attempts = int(state.get("max_attempts", 2))
+        if attempts < max_attempts:
+            return "codegen"
+        return "reporter"
+    return "critic"
 
 
 def critic_node(state: AgentState) -> AgentState:
@@ -137,57 +179,20 @@ def critic_node(state: AgentState) -> AgentState:
         exec_error=state.get("exec_error", None),
     ))
 
-    verdict = "RETRY"
-    feedback = "Не удалось разобрать ответ критика."
-
-    raw = (msg.content or "").strip()
-    try:
-        data = json.loads(raw)
-        verdict = data.get("verdict", "RETRY")
+    data = _parse_json_loose(msg.content)
+    if data:
+        verdict = data.get("verdict", "OK")
         feedback = data.get("feedback", "")
-        return {"critic_verdict": verdict, "critic_feedback": feedback}
-    except Exception:
-        pass
-
-    try:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            chunk = raw[start:end+1]
-            data = json.loads(chunk)
-            verdict = data.get("verdict", "RETRY")
-            feedback = data.get("feedback", "")
-            return {"critic_verdict": verdict, "critic_feedback": feedback}
-    except Exception:
-        pass
-
-    txt = raw
-    if "OK" in txt and "RETRY" not in txt:
-        verdict = "OK"
-        feedback = txt[:500]
     else:
-        verdict = "RETRY"
-        feedback = txt[:500]
+        raw = (msg.content or "").strip()
+        if "RETRY" in raw:
+            verdict = "RETRY"
+            feedback = raw[:500]
+        else:
+            verdict = "OK"
+            feedback = raw[:500]
 
     return {"critic_verdict": verdict, "critic_feedback": feedback}
-
-
-def reporter_node(state: AgentState) -> AgentState:
-    llm = make_llm("reporter")
-    msg = llm.invoke(REPORTER_PROMPT.format_messages(
-        query=state["query"],
-        plan=state.get("plan", ""),
-        result_kind=state.get("result_kind", "scalar"),
-        result_facts=state.get("result_facts", state.get("result_preview", "")),
-    ))
-    return {"final_answer": msg.content}
-
-
-def attempt_guard_node(state: AgentState) -> AgentState:
-    if state.get("critic_verdict") == "RETRY":
-        attempts = int(state.get("attempts", 0)) + 1
-        return {"attempts": attempts}
-    return {"attempts": int(state.get("attempts", 0))}
 
 
 def route_after_critic(state: AgentState) -> str:
@@ -201,6 +206,21 @@ def route_after_critic(state: AgentState) -> str:
     return "codegen"
 
 
+def reporter_node(state: AgentState) -> AgentState:
+    llm = make_llm("reporter")
+    msg = llm.invoke(REPORTER_PROMPT.format_messages(
+        query=state["query"],
+        plan=state.get("plan", ""),
+        result_kind=state.get("result_kind", "scalar"),
+        result_facts=state.get("result_facts", state.get("result_preview", "")),
+    ))
+    return {"final_answer": msg.content}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Graph
+# ═══════════════════════════════════════════════════════════════════════
+
 def build_graph():
     g = StateGraph(AgentState)
 
@@ -211,7 +231,6 @@ def build_graph():
     g.add_node("codegen", codegen_node)
     g.add_node("exec", exec_node)
     g.add_node("critic", critic_node)
-    g.add_node("attempt_guard", attempt_guard_node)
     g.add_node("reporter", reporter_node)
 
     g.set_entry_point("router")
@@ -226,11 +245,17 @@ def build_graph():
 
     g.add_edge("planner", "codegen")
     g.add_edge("codegen", "exec")
-    g.add_edge("exec", "critic")
-    g.add_edge("critic", "attempt_guard")
 
+    # After exec: error → retry codegen or give up; success → critic
     g.add_conditional_edges(
-        "attempt_guard",
+        "exec",
+        route_after_exec,
+        {"codegen": "codegen", "critic": "critic", "reporter": "reporter"},
+    )
+
+    # After critic: OK → reporter; RETRY → codegen
+    g.add_conditional_edges(
+        "critic",
         route_after_critic,
         {"codegen": "codegen", "reporter": "reporter"},
     )
@@ -255,6 +280,7 @@ def run_once(df: Any, query: str, messages: Optional[List[BaseMessage]] = None, 
     return {
         "final_answer": out.get("final_answer", ""),
         "result_preview": out.get("result_preview", ""),
+        "result_base64": out.get("result_base64", ""),
         "code": out.get("code", ""),
         "critic_verdict": out.get("critic_verdict", ""),
         "critic_feedback": out.get("critic_feedback", ""),

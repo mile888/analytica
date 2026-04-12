@@ -14,7 +14,7 @@ import streamlit as st
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from source.agent import run_once
-from source.func import safe_exec, df_schema_text
+from source.engine import create_engine
 
 
 def inject_styles():
@@ -85,6 +85,7 @@ class TurnMeta:
     final_answer: str
     code: str
     result_preview: str
+    result_base64: str
     exec_error: Optional[str]
     critic_verdict: str
     critic_feedback: str
@@ -111,6 +112,7 @@ def append_turn(out: Dict[str, Any], query: str):
         final_answer=out.get("final_answer", "") or "",
         code=out.get("code", "") or "",
         result_preview=out.get("result_preview", "") or "",
+        result_base64=out.get("result_base64", "") or "",
         exec_error=out.get("exec_error", None),
         critic_verdict=out.get("critic_verdict", "") or "",
         critic_feedback=out.get("critic_feedback", "") or "",
@@ -159,11 +161,11 @@ def build_markdown_report() -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-st.set_page_config(page_title="Analytica • Demo", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Analytica • Demo", layout="wide")
 inject_styles()
 init_session()
 
-st.markdown("<div class='title'>📊 Analytica Demo</div>", unsafe_allow_html=True)
+st.markdown("<div class='title'>Analytica Demo</div>", unsafe_allow_html=True)
 st.markdown(
     "<div class='subtitle'>Загрузи CSV (или используй <code>data/train.csv</code>) → задай вопрос → агент построит план, код и ответ.</div>",
     unsafe_allow_html=True,
@@ -186,7 +188,7 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Не удалось прочитать CSV: {e}")
 
-    if st.button("🧹 Очистить диалог", use_container_width=True):
+    if st.button("Очистить диалог", use_container_width=True):
         st.session_state.chat = []
         st.session_state.turns = []
         st.session_state.last_raw = {}
@@ -197,14 +199,6 @@ with st.sidebar:
     engine = st.selectbox("engine для run_once()", ["auto", "pandas", "polars", "spark"], index=0)
     st.caption("Если выберешь polars/spark — убедись, что зависимости установлены и агент умеет их использовать.")
 
-    st.divider()
-
-    st.subheader("Визуализация результата")
-    rerun_code_for_display = st.checkbox(
-        "Безопасно переисполнить сгенерированный код для показа DataFrame/графика",
-        value=True,
-    )
-    st.caption("Используется source.func.safe_exec (с ограничениями).")
 
     st.divider()
 
@@ -239,7 +233,7 @@ with top_left:
         with st.expander("Схема (как видит агент)"):
             try:
                 schema_engine = engine if engine != "auto" else "pandas"
-                st.code(df_schema_text(df, schema_engine), language="text")
+                st.code(create_engine(schema_engine).schema_text(df), language="text")
             except Exception as e:
                 st.error(f"Не удалось построить схему: {e}")
 
@@ -288,7 +282,7 @@ st.divider()
 st.subheader("Детали последнего запуска")
 
 if len(st.session_state.turns) == 0:
-    card("Пока пусто", "Спроси что-нибудь — здесь появятся код, превью результата и вердикт критика.", icon="🧾")
+    card("Пока пусто", "Спроси что-нибудь — здесь появятся код, превью результата и вердикт критика.")
 else:
     t = st.session_state.turns[-1]
 
@@ -332,34 +326,10 @@ else:
             else:
                 st.info("code пустой")
 
-        with st.expander("Показ результата (safe_exec)", expanded=False):
-            if not rerun_code_for_display:
-                st.info("Включи чекбокс в сайдбаре, чтобы переисполнить код для отображения результата.")
-            elif not t.code:
-                st.info("Нет кода для выполнения.")
-            elif df is None:
-                st.info("Нет данных.")
+        with st.expander("Результат", expanded=True):
+            if t.result_base64:
+                st.image(t.result_base64, use_container_width=True)
+            elif t.result_preview:
+                st.code(t.result_preview)
             else:
-                run_engine = (t.engine or engine or "pandas")
-                if run_engine == "auto":
-                    run_engine = "pandas"
-
-                result, err = safe_exec(t.code, df, run_engine)
-                if err:
-                    st.error(err)
-                else:
-                    try:
-                        import matplotlib.figure as mplfig
-                        if isinstance(result, mplfig.Figure):
-                            st.pyplot(result, use_container_width=True)
-                        elif isinstance(result, pd.DataFrame):
-                            st.dataframe(result, use_container_width=True, height=420)
-                        elif isinstance(result, pd.Series):
-                            st.dataframe(result.to_frame("value"), use_container_width=True, height=420)
-                        else:
-                            st.code(str(result))
-                    except Exception as e:
-                        st.error(f"Не удалось отрисовать результат: {e}")
-                        st.code(str(result))
-
-    st.caption("Примечание: агент уже исполняет код внутри графа, но для красивого UI мы переисполняем его ещё раз через safe_exec, чтобы показать DataFrame/график.")
+                st.info("Нет результата для отображения.")
