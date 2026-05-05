@@ -1,22 +1,62 @@
+"""Quick CLI runner for the analytics agent pipeline.
+
+Usage:
+    python run.py
+"""
 import pandas as pd
 from source.agent import run_once
-import matplotlib.pyplot as plt
 
+
+import os
+import sys
+from dotenv import load_dotenv
+
+load_dotenv()
 
 if __name__ == "__main__":
-    df = pd.read_csv("data/train.csv")
-    query = '/bar x=Category y=Sales agg=sum top=5 title=Top-5_categories_by_sales'
-    out = run_once(df, query)
+    data_path = "data/train.csv"
+
+    if not os.path.exists(data_path):
+        print(f"Error: Dataset not found at '{data_path}'. Please ensure the file exists.")
+        sys.exit(1)
+
+    try:
+        df = pd.read_csv(data_path)
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        sys.exit(1)
+
+    query = "Какие метрики и срезы нужны, чтобы понять падение продаж по категориям?"
+
+    try:
+        out = run_once(df, query)
+    except Exception as e:
+        print(f"Critical execution error: {e}")
+        sys.exit(1)
 
     print("=== FINAL ANSWER ===")
     print(out["final_answer"])
+
+    print("\n=== SELECTED SKILLS ===")
+    print(out.get("selected_skills", []))
+
+    print("\n=== SELECTED TOOLS ===")
+    print(out.get("selected_tools", []))
 
     print("\n=== GENERATED CODE ===")
     print(out["code"])
 
     print("\n=== EXEC ERROR ===")
     print(out["exec_error"])
+
     print("\n=== RESULT PREVIEW ===")
     print(out["result_preview"])
-    plt.show()
 
+    # Plot output (if any) is already encoded as a base64 data-URI
+    # and can be rendered directly in a browser or Streamlit UI.
+    b64 = out.get("result_base64", "")
+    if b64:
+        print("\n=== PLOT (base64 data-URI, first 120 chars) ===")
+        print(b64[:120] + "...")
+    else:
+        print("\n=== No plot generated ===")

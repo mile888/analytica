@@ -1,18 +1,42 @@
-from typing import Any, Dict, Optional
+from __future__ import annotations
+
+from typing import Any, Dict, Optional, Sequence
+import os
+import re
+
 import pandas as pd
 from dotenv import load_dotenv
-from source.llm.factory import make_llm
+
+from source.llm.llm_config import LLMConfig, EngineName, load_llm_config, resolve_api_key
+from source.engine import BaseEngine, create_engine
 
 load_dotenv()
 
-def df_schema_text(df: pd.DataFrame) -> str:
-    dtypes = {c: str(t) for c, t in df.dtypes.items()}
-    return (
-        f"rows={len(df)}, cols={len(df.columns)}\n"
-        f"columns={list(df.columns)}\n"
-        f"dtypes={dtypes}\n"
-        f"missing={df.isna().sum().to_dict()}"
-    )
+from source.llm.factory import make_llm, _get_config
+
+
+def detect_engine(df: Any, engine: Optional[str] = None) -> EngineName:
+    """
+    Resolve the compute engine.
+
+    Priority:
+      1. Explicit `engine` argument (if not "auto").
+      2. `defaults.engine` from llm_config.yaml.
+      3. Falls back to "pandas".
+    """
+    if engine and engine.strip().lower() in {"pandas", "polars", "spark"}:
+        return engine.strip().lower()  # type: ignore[return-value]
+
+    cfg = _get_config()
+    return cfg.defaults.engine
+
+
+def get_engine(df: Any, engine: Optional[str] = None) -> BaseEngine:
+    """Convenience: detect engine name and return the engine instance."""
+    name = detect_engine(df, engine)
+    return create_engine(name)
+
+
 
 def preview_result(result: Any, max_chars: int = 800) -> str:
     try:
@@ -24,7 +48,31 @@ def preview_result(result: Any, max_chars: int = 800) -> str:
     except Exception as e:
         return f"<preview_error: {e}>"
 
+
+def figure_to_base64(fig: Any, fmt: str = "png", dpi: int = 150) -> str:
+    """Render a matplotlib Figure to a base64-encoded PNG string.
+
+    Returns a data-URI ready string: 'data:image/png;base64,...'
+    Returns empty string on failure.
+    """
+    try:
+        import base64
+        import io
+        buf = io.BytesIO()
+        fig.savefig(buf, format=fmt, dpi=dpi, bbox_inches="tight")
+        buf.seek(0)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        buf.close()
+        return f"data:image/{fmt};base64,{b64}"
+    except Exception:
+        return ""
+
+
 def _describe_matplotlib_figure(fig: Any, max_bars: int = 10, max_chars: int = 800) -> str:
+    """
+    Extract a semantic description of a matplotlib figure:
+    title/xlabel/ylabel + bar heights (if bar chart).
+    """
     try:
         axes = getattr(fig, "axes", None)
         if not axes:
@@ -43,93 +91,65 @@ def _describe_matplotlib_figure(fig: Any, max_bars: int = 10, max_chars: int = 8
 
         bars = []
         try:
-            patches = getattr(ax, "patches", []) or []
-            # ticks as labels:
-            xticklabels = []
-            try:
-                xticklabels = [t.get_text() for t in ax.get_xticklabels()]
-                xticklabels = [x for x in xticklabels if x is not None]
-            except Exception:
-                xticklabels = []
-
-            for i, p in enumerate(patches[:max_bars]):
+            patches = getattr(ax, "patches", [])
+            for p in patches[:max_bars]:
                 h = getattr(p, "get_height", lambda: None)()
-                lbl = ""
-                if i < len(xticklabels) and xticklabels[i]:
-                    lbl = xticklabels[i]
-                else:
-                    x = getattr(p, "get_x", lambda: None)()
-                    lbl = str(x)
-                bars.append((lbl, h))
+                if h is None:
+                    continue
+                bars.append(float(h))
         except Exception:
-            bars = []
-
-        parts = []
-        parts.append("plot: matplotlib Figure")
-        if title:
-            parts.append(f"title={title}")
-        if xlabel:
-            parts.append(f"xlabel={xlabel}")
-        if ylabel:
-            parts.append(f"ylabel={ylabel}")
-        if bars:
-            cleaned = [(l.strip(), v) for l, v in bars]
-            cleaned = [(l if l else f"bar_{i+1}", v) for i, (l, v) in enumerate(cleaned)]
-            bars_txt = ", ".join([f"{l}={v:.4g}" if isinstance(v, (int, float)) else f"{l}={v}" for l, v in cleaned])
-            parts.append(f"bars(top {min(len(bars), max_bars)}): {bars_txt}")
-
-        s = " | ".join(parts)
-        return s[:max_chars]
-    except Exception as e:
-        return f"plot: Figure (describe_error: {e})"[:max_chars]
-
-
-def preview_result_and_facts(result: Any, exec_error: Optional[str]) -> tuple[str, str, str]:
-    """
-    Возвращает (result_kind, result_preview, result_facts)
-    result_preview — коротко (для логов),
-    result_facts — максимально полезно для critic/reporter.
-    """
-    if exec_error is not None:
-        return "error", "", f"Execution failed: {exec_error}"
-
-    try:
-        # matplotlib Figure
-        try:
-            from matplotlib.figure import Figure
-            if isinstance(result, Figure):
-                facts = _describe_matplotlib_figure(result)
-                return "plot", "Figure", facts
-        except Exception:
-            # если matplotlib не доступен как класс — fallback ниже
             pass
 
-        if isinstance(result, pd.DataFrame):
-            prev = result.head(10).to_string(index=False)[:800]
-            facts = f"dataframe shape={result.shape}, columns={list(result.columns)}; head:\n{prev}"
-            return "dataframe", prev, facts
+        bars_txt = ""
+        if bars:
+            bars_txt = f"; top_bars_heights={bars[:max_bars]}"
 
-        if isinstance(result, pd.Series):
-            prev = result.head(10).to_string()[:800]
-            facts = f"series name={result.name}, len={len(result)}; head:\n{prev}"
-            return "series", prev, facts
-
-        s = str(result)[:800]
-        return "scalar", s, f"scalar: {s}"
+        out = f"plot: title={title!r}, xlabel={xlabel!r}, ylabel={ylabel!r}{bars_txt}"
+        return out[:max_chars]
     except Exception as e:
-        return "scalar", "", f"preview_error: {e}"
+        return f"plot: <describe_error {e}>"[:max_chars]
+
+
+def preview_result_and_facts(result: Any, err: Optional[str]) -> tuple[str, str, str, str]:
+    """Inspect an execution result and return (kind, preview, facts, base64).
+
+    base64 is a data-URI string for plot results, empty string otherwise.
+    """
+    if err:
+        return "error", "", err, ""
+
+    try:
+        import matplotlib.figure as mplfig
+        if isinstance(result, mplfig.Figure):
+            b64 = figure_to_base64(result)
+            return "plot", "<matplotlib Figure>", _describe_matplotlib_figure(result), b64
+    except Exception:
+        pass
+
+    if isinstance(result, pd.DataFrame):
+        rp = preview_result(result)
+        facts = f"dataframe shape={result.shape}; columns={list(result.columns)}; preview=\n{rp}"
+        return "dataframe", rp, facts, ""
+
+    if isinstance(result, pd.Series):
+        rp = preview_result(result)
+        facts = f"series len={len(result)}; name={result.name}; preview=\n{rp}"
+        return "series", rp, facts, ""
+
+    rp = preview_result(result)
+    facts = f"scalar type={type(result).__name__}; value_preview={rp}"
+    return "scalar", rp, facts, ""
+
+
+
+_CODE_BLOCK_RE = re.compile(r"```python\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
 
 def extract_code_block(text: str) -> str:
-    start = text.find("```python")
-    if start == -1:
-        return ""
-    start += len("```python")
-    end = text.find("```", start)
-    if end == -1:
-        return ""
-    return text[start:end].strip()
-
-
+    m = _CODE_BLOCK_RE.search(text or "")
+    if m:
+        return m.group(1).strip()
+    return (text or "").strip()
 
 def _strip_quotes(v: str) -> str:
     v = v.strip()
@@ -181,27 +201,26 @@ def _bar_codegen(query: str) -> str:
         if not third:
             need = "stack" if cmd == "/bar_stacked" else "group"
             return f"result = 'CommandBar error: {cmd} требует {need}=<col>'"
-
-        prelude = f"""
-df2 = df.copy()
-df2 = df2.dropna(subset={[x, third, y]!r})
+        prelude = f'''
+df2 = to_pandas(df) if callable(to_pandas) else df.copy()
+df2 = df2.dropna(subset=[{x!r}, {third!r}, {y!r}])
 df2[{y!r}] = pd.to_numeric(df2[{y!r}], errors="coerce")
-df2 = df2.dropna(subset={[y]!r})
-""".strip()
+df2 = df2.dropna(subset=[{y!r}])
+'''.strip()
     else:
-        prelude = f"""
-df2 = df.copy()
-df2 = df2.dropna(subset={[x, y]!r})
+        prelude = f'''
+df2 = to_pandas(df) if callable(to_pandas) else df.copy()
+df2 = df2.dropna(subset=[{x!r}, {y!r}])
 df2[{y!r}] = pd.to_numeric(df2[{y!r}], errors="coerce")
-df2 = df2.dropna(subset={[y]!r})
-""".strip()
+df2 = df2.dropna(subset=[{y!r}])
+'''.strip()
 
-    fig_block = """
+    fig_block = '''
 fig, ax = plt.subplots(figsize=(6, 4))
-""".strip()
+'''.strip()
 
     if cmd == "/bar":
-        code = f"""
+        code = f'''
 {prelude}
 s = df2.groupby({x!r})[{y!r}].{agg}().sort_values(ascending=False).head({top})
 {fig_block}
@@ -212,11 +231,11 @@ ax.set_title({title!r} if {title!r} else "Bar chart")
 ax.tick_params(axis="x", rotation=45)
 fig.tight_layout()
 result = fig
-""".strip()
+'''.strip()
         return code
 
     if cmd == "/barh":
-        code = f"""
+        code = f'''
 {prelude}
 s = df2.groupby({x!r})[{y!r}].{agg}().sort_values(ascending=False).head({top})
 {fig_block}
@@ -226,11 +245,11 @@ ax.set_xlabel(f"{agg}({y})")
 ax.set_title({title!r} if {bool(title)} else "Horizontal bar chart")
 fig.tight_layout()
 result = fig
-""".strip()
+'''.strip()
         return code
 
     if cmd == "/bar_share":
-        code = f"""
+        code = f'''
 {prelude}
 s = df2.groupby({x!r})[{y!r}].{agg}().sort_values(ascending=False).head({top})
 total = float(s.sum()) if float(s.sum()) != 0.0 else 1.0
@@ -243,11 +262,11 @@ ax.set_title({title!r} if {bool(title)} else "Bar share (%)")
 ax.tick_params(axis="x", rotation=45)
 fig.tight_layout()
 result = fig
-""".strip()
+'''.strip()
         return code
 
     if cmd == "/bar_stacked":
-        code = f"""
+        code = f'''
 {prelude}
 pt = df2.pivot_table(index={x!r}, columns={stack!r}, values={y!r}, aggfunc={agg}, fill_value=0.0)
 pt = pt.assign(__total__=pt.sum(axis=1)).sort_values("__total__", ascending=False).head({top}).drop(columns="__total__")
@@ -259,11 +278,11 @@ ax.set_title({title!r} if {bool(title)} else "Stacked bar chart")
 ax.tick_params(axis="x", rotation=45)
 fig.tight_layout()
 result = fig
-""".strip()
+'''.strip()
         return code
 
     if cmd == "/bar_grouped":
-        code = f"""
+        code = f'''
 {prelude}
 pt = df2.pivot_table(index={x!r}, columns={group!r}, values={y!r}, aggfunc={agg}, fill_value=0.0)
 pt = pt.assign(__total__=pt.sum(axis=1)).sort_values("__total__", ascending=False).head({top}).drop(columns="__total__")
@@ -275,32 +294,51 @@ ax.set_title({title!r} if {bool(title)} else "Grouped bar chart")
 ax.tick_params(axis="x", rotation=45)
 fig.tight_layout()
 result = fig
-""".strip()
+'''.strip()
         return code
 
-    return "result = 'CommandBar error: неизвестная bar-команда'"
+    return "result = 'CommandBar error: unknown'"
 
 
+SAFE_BUILTINS = {
+    "abs": abs,
+    "min": min,
+    "max": max,
+    "sum": sum,
+    "len": len,
+    "range": range,
+    "sorted": sorted,
+    "list": list,
+    "dict": dict,
+    "set": set,
+    "tuple": tuple,
+    "enumerate": enumerate,
+    "callable": callable,
+    "float": float,
+    "int": int,
+    "str": str,
+}
 
-def safe_exec_pandas(code: str, df: pd.DataFrame) -> tuple[Any, Optional[str]]:
+
+def safe_exec(code: str, df: Any, engine: BaseEngine | EngineName) -> tuple[Any, Optional[str]]:
+    """Execute generated code in a sandboxed environment.
+
+    `engine` can be either a BaseEngine instance or an EngineName string.
+    """
     banned = ["import ", "open(", "read_csv", "read_excel", "to_csv", "to_excel", "eval(", "exec("]
-    lowered = code.lower()
+    lowered = (code or "").lower()
     if any(b.lower() in lowered for b in banned):
         return None, "Unsafe code blocked by policy (imports/files/exec/eval)."
 
-    env: Dict[str, Any] = {"df": df, "pd": pd}
-
-
-    try:
-        import matplotlib.pyplot as plt
-        env["plt"] = plt
-    except Exception:
-        env["plt"] = None
+    # Resolve engine
+    eng: BaseEngine = engine if isinstance(engine, BaseEngine) else create_engine(engine)
+    env = eng.exec_env(df)
 
     try:
-        exec(code, {}, env)
+        exec(code, {"__builtins__": SAFE_BUILTINS}, env)
         if "result" not in env:
             return None, "Code executed but did not assign variable `result`."
         return env["result"], None
     except Exception as e:
         return None, f"Execution error: {e}"
+

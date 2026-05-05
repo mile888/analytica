@@ -1,25 +1,34 @@
-import pandas as pd
-from typing import Any, List, Optional, Literal, TypedDict
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+"""Compatibility output types for the active Deep Agents runtime.
+
+The old planner/codegen/critic LangGraph pipeline was moved out of the active
+runtime. The application now executes through `source.agent.run_agent`, which
+uses `deepagents.create_deep_agent`.
+"""
+from __future__ import annotations
+
+from typing import Any, Literal, Optional, TypedDict
 
 
-class AgentState(TypedDict, total=False):
+class DeepAgentRunState(TypedDict, total=False):
+    """Normalized metadata returned by the Deep Agent adapter to UI/CLI callers."""
+
     query: str
-    df: pd.DataFrame
-    chat_history: List[BaseMessage]
-
-    plan: str
+    final_answer: str
     code: str
     exec_error: Optional[str]
-    result: Any
     result_preview: str
-
-    result_kind: Literal["plot", "dataframe", "series", "scalar", "error"]
+    result_base64: str
+    result_kind: Literal["plot", "dataframe", "series", "scalar", "error", ""]
     result_facts: str
-
-    critic_verdict: Literal["OK", "RETRY"]
+    engine: str
+    needs_data: Optional[bool]
+    use_case: str
+    selected_skills: list[str]
+    selected_tools: list[str]
+    critic_verdict: str
     critic_feedback: str
-    attempts: int
-    max_attempts: int
+    raw_result: Any
 
-    final_answer: str
+
+# Backward-compatible alias for old imports in archived modules.
+AgentState = DeepAgentRunState
