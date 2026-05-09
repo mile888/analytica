@@ -4,7 +4,7 @@ Engine factory — encapsulates data loading and processing for each backend.
 Usage:
     from source.engine import create_engine
     engine = create_engine("pandas")
-    df = engine.read_csv("data/train.csv")
+    df = engine.read_csv("path/to/file.csv")
     schema = engine.schema_text(df)
 """
 from __future__ import annotations

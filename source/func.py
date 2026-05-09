@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Sequence
+import ast
 import os
 import re
 
 import pandas as pd
 from dotenv import load_dotenv
 
+from source.config import ALLOWED_CODE_IMPORTS, MPLBACKEND, MPLCONFIGDIR
 from source.llm.llm_config import LLMConfig, EngineName, load_llm_config, resolve_api_key
 from source.engine import BaseEngine, create_engine
 
 load_dotenv()
+MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(MPLCONFIGDIR))
+os.environ.setdefault("MPLBACKEND", MPLBACKEND)
 
 from source.llm.factory import make_llm, _get_config
 
@@ -320,25 +325,100 @@ SAFE_BUILTINS = {
 }
 
 
+def _limited_import(name, globals=None, locals=None, fromlist=(), level=0):
+    root = name.split(".", 1)[0]
+    allowed_roots = {item.split(".", 1)[0] for item in ALLOWED_CODE_IMPORTS}
+    allowed_exact = set(ALLOWED_CODE_IMPORTS)
+    if name in allowed_exact or root in allowed_roots:
+        return __import__(name, globals, locals, fromlist, level)
+    raise ImportError(f"Import {name!r} is not allowed in analysis code.")
+
+
+def _validate_analysis_ast(code: str) -> Optional[str]:
+    """Reject file/network/process side effects while allowing normal pandas analysis."""
+    try:
+        tree = ast.parse(code or "")
+    except SyntaxError as exc:
+        return f"Syntax error: {exc}"
+
+    blocked_calls = {
+        "open",
+        "eval",
+        "exec",
+        "compile",
+        "input",
+        "__import__",
+        "read_csv",
+        "read_excel",
+        "read_parquet",
+        "to_csv",
+        "to_excel",
+        "to_parquet",
+        "to_sql",
+        "remove",
+        "unlink",
+        "rmdir",
+        "mkdir",
+        "makedirs",
+        "system",
+        "popen",
+        "run",
+        "call",
+        "check_call",
+        "check_output",
+    }
+    blocked_import_roots = {"os", "sys", "subprocess", "pathlib", "shutil", "socket", "requests"}
+    allowed_import_roots = {item.split(".", 1)[0] for item in ALLOWED_CODE_IMPORTS}
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif node.module:
+                names = [node.module]
+            for name in names:
+                root = name.split(".", 1)[0]
+                if root in blocked_import_roots:
+                    return f"Unsafe import blocked by policy: {name}"
+                if root not in allowed_import_roots:
+                    return f"Import {name!r} is not allowed in analysis code."
+
+        if isinstance(node, ast.Call):
+            func = node.func
+            call_name = ""
+            if isinstance(func, ast.Name):
+                call_name = func.id
+            elif isinstance(func, ast.Attribute):
+                call_name = func.attr
+            if call_name in blocked_calls:
+                return f"Unsafe call blocked by policy: {call_name}()"
+
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+            return "Dunder attribute access is blocked in analysis code."
+
+    return None
+
+
 def safe_exec(code: str, df: Any, engine: BaseEngine | EngineName) -> tuple[Any, Optional[str]]:
     """Execute generated code in a sandboxed environment.
 
     `engine` can be either a BaseEngine instance or an EngineName string.
     """
-    banned = ["import ", "open(", "read_csv", "read_excel", "to_csv", "to_excel", "eval(", "exec("]
-    lowered = (code or "").lower()
-    if any(b.lower() in lowered for b in banned):
-        return None, "Unsafe code blocked by policy (imports/files/exec/eval)."
+    policy_error = _validate_analysis_ast(code)
+    if policy_error:
+        return None, policy_error
 
     # Resolve engine
     eng: BaseEngine = engine if isinstance(engine, BaseEngine) else create_engine(engine)
     env = eng.exec_env(df)
+    builtins = dict(SAFE_BUILTINS)
+    builtins["__import__"] = _limited_import
 
     try:
-        exec(code, {"__builtins__": SAFE_BUILTINS}, env)
+        exec(code, {"__builtins__": builtins}, env)
         if "result" not in env:
             return None, "Code executed but did not assign variable `result`."
         return env["result"], None
     except Exception as e:
         return None, f"Execution error: {e}"
-

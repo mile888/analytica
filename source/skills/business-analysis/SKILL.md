@@ -1,29 +1,22 @@
 ---
-name: business-analysis
-description: Use this skill when the user asks for business interpretation, recommendations, hypotheses, metric design, project framing, or analytical strategy without requiring direct calculations from a dataset.
+name: business_analysis
+description: Business interpretation, metric design, hypotheses, recommendations, and analytical framing when no direct dataset calculation is required.
 allowed-tools:
 ---
 
-# Business Analysis Skill
+# Business Analysis
 
-## Purpose
-This skill helps answer business analytics questions without executing code.
+## When To Use
+Use this skill for strategy, interpretation, metric design, hypotheses, decision framing, or next-step recommendations that do not require direct computation from the current dataset.
 
 ## Workflow
-1. Identify the business problem.
-2. Clarify the goal, metric, or decision if needed.
-3. Provide a concise structured answer.
-4. Suggest useful metrics, segments, or next analysis steps.
-5. Avoid pretending that calculations were performed.
-
-## Tools to Use
-- Do not call a separate business-answer tool.
-- Answer directly using the Deep Agent model.
-- Do not call `inspect_dataset_schema`, `top_n`, `plot_bar`, or `run_python_analysis` for this skill.
-- If the user asks for calculations from a dataset, switch to `data-analysis` instead of answering from this skill.
+1. Identify the business goal and decision context.
+2. Separate facts from assumptions.
+3. Suggest useful metrics, segments, and validation checks.
+4. Keep recommendations practical and concise.
+5. If the user asks for dataset-backed numbers, switch to `data_analysis` or `csv_dataframe_analysis`.
 
 ## Rules
-- Do not use code.
-- Do not claim that data was analyzed if no data execution happened.
-- Keep the answer practical and business-oriented.
-- Prefer short structured recommendations.
+- Do not claim that data was analyzed unless a data tool was called.
+- Do not use code for business-only answers.
+- Do not borrow assumptions from demos, docs, or previous unrelated runs.

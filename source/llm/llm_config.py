@@ -3,6 +3,8 @@ from pydantic import BaseModel, Field, model_validator
 import yaml
 import os
 
+from source.config import LLM_CONFIG_PATH, env_str
+
 EngineName = Literal["pandas", "polars", "spark", "auto", ""]
 
 class NodeLLMOverride(BaseModel):
@@ -11,8 +13,10 @@ class NodeLLMOverride(BaseModel):
     temperature: Optional[float] = None
 
 class LLMDefaults(BaseModel):
-    provider: str = Field(default="gemini")
-    model: str = Field(default="gemini-2.5-flash")
+    provider: str = Field(default_factory=lambda: env_str("ANALYTICA_LLM_PROVIDER", ""))
+    model: str = Field(default_factory=lambda: env_str("ANALYTICA_LLM_MODEL", ""))
+    fallback_provider: str = Field(default_factory=lambda: env_str("ANALYTICA_FALLBACK_LLM_PROVIDER", ""))
+    fallback_model: str = Field(default_factory=lambda: env_str("ANALYTICA_FALLBACK_LLM_MODEL", ""))
     temperature: float = Field(default=1.0)
     max_tokens: Optional[int] = None
     timeout: Optional[float] = None
@@ -40,9 +44,21 @@ class LLMConfig(BaseModel):
         return self
 
 
-def load_llm_config(path: str = "llm_config.yaml") -> LLMConfig:
-    with open(path, "r", encoding="utf-8") as f:
+def load_llm_config(path: str | os.PathLike[str] | None = None) -> LLMConfig:
+    resolved_path = path or LLM_CONFIG_PATH
+    with open(resolved_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
+    defaults = raw.setdefault("defaults", {})
+    defaults["provider"] = env_str("ANALYTICA_LLM_PROVIDER", str(defaults.get("provider", "")))
+    defaults["model"] = env_str("ANALYTICA_LLM_MODEL", str(defaults.get("model", "")))
+    defaults["fallback_provider"] = env_str(
+        "ANALYTICA_FALLBACK_LLM_PROVIDER",
+        str(defaults.get("fallback_provider", "")),
+    )
+    defaults["fallback_model"] = env_str(
+        "ANALYTICA_FALLBACK_LLM_MODEL",
+        str(defaults.get("fallback_model", "")),
+    )
     return LLMConfig(**raw)
 
 

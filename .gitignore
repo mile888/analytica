@@ -185,3 +185,14 @@ cython_debug/
 __pycache__/
 .DS_Store
 
+
+# Analytica local state
+.analytica/
+artifacts/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Local logs / temp files
+*.log
+*.tmp

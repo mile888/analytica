@@ -1,35 +1,57 @@
 """Quick CLI runner for the analytics agent pipeline.
 
 Usage:
-    python run.py
+    python run.py --csv path/to/file.csv --query "Опиши структуру данных"
 """
-import pandas as pd
-from source.agent import run_once
+from __future__ import annotations
 
-
-import os
+import argparse
 import sys
-from dotenv import load_dotenv
 
+import pandas as pd
+
+from source.agent import run_once
+from source.config import DEFAULT_CLI_QUERY, DEFAULT_DATA_PATH
+from source.dataframe import read_csv_dataset
+
+
+from dotenv import load_dotenv
 load_dotenv()
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run Analytica data agent from CLI.")
+    parser.add_argument(
+        "--csv",
+        default=str(DEFAULT_DATA_PATH),
+        help="CSV path. Relative paths are resolved from the project root.",
+    )
+    parser.add_argument(
+        "--query",
+        default=DEFAULT_CLI_QUERY,
+        help="Analytical question for the agent.",
+    )
+    parser.add_argument(
+        "--engine",
+        default="auto",
+        choices=["auto", "pandas", "polars", "spark"],
+        help="Compute engine used by analysis tools.",
+    )
+    parser.add_argument("--sep", default=",", help="CSV separator.")
+    parser.add_argument("--encoding", default="utf-8", help="CSV encoding.")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    data_path = "data/train.csv"
-
-    if not os.path.exists(data_path):
-        print(f"Error: Dataset not found at '{data_path}'. Please ensure the file exists.")
-        sys.exit(1)
-
+    args = parse_args()
     try:
-        df = pd.read_csv(data_path)
+        df: pd.DataFrame = read_csv_dataset(args.csv, sep=args.sep, encoding=args.encoding)
     except Exception as e:
-        print(f"Error loading dataset: {e}")
+        print(f"Error loading CSV: {e}")
         sys.exit(1)
 
-    query = "Какие метрики и срезы нужны, чтобы понять падение продаж по категориям?"
-
     try:
-        out = run_once(df, query)
+        out = run_once(df, args.query, engine=args.engine)
     except Exception as e:
         print(f"Critical execution error: {e}")
         sys.exit(1)
