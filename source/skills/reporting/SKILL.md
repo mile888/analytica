@@ -1,7 +1,6 @@
 ---
 name: reporting
 description: Final analytical response and optional markdown report artifact creation from facts already produced by tools.
-allowed-tools: write_report_artifact
 ---
 
 # Reporting

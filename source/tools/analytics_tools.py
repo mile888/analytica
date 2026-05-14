@@ -3,9 +3,10 @@ from __future__ import annotations
 import re
 import warnings
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 import pandas as pd
+from langchain.tools import ToolRuntime, tool
 
 from source.config import ALLOWED_AGGREGATIONS, ARTIFACT_DIR, DEFAULT_TOP_N, MAX_TOOL_ROWS, MAX_TOP_N
 from source.dataframe import (
@@ -15,9 +16,9 @@ from source.dataframe import (
     validate_read_only_sql,
     run_dataframe_sql_with_metadata,
 )
-from source.func import _bar_codegen
-from source.tools.code_tools import execute_code_tool
-from source.tools.data_tools import inspect_schema_tool
+from source.engine import create_engine
+from source.func import _bar_codegen, detect_engine, preview_result_and_facts, safe_exec
+from source.runtime_context import AnalyticaContext
 
 
 def _safe_agg(agg: str) -> str:
@@ -36,14 +37,36 @@ def _quote(value: str) -> str:
     return repr(value)
 
 
+def _inspect_schema(df: Any, engine: str = "auto") -> dict[str, Any]:
+    engine_name = detect_engine(df, engine)
+    engine_impl = create_engine(engine_name)
+    table = engine_impl.ensure_table(df)
+    return {
+        "engine": engine_name,
+        "df": table,
+        "schema": engine_impl.schema_text(table),
+    }
+
+
+def _execute_code(code: str, df: Any, engine: str) -> dict[str, Any]:
+    result, err = safe_exec(code, df, engine)
+    kind, preview, facts, b64 = preview_result_and_facts(result, err)
+    return {
+        "result": result,
+        "exec_error": err,
+        "result_kind": kind,
+        "result_preview": preview,
+        "result_facts": facts,
+        "result_base64": b64,
+    }
+
+
 def _infer_schema_fields(df: Any, engine: str) -> dict[str, list[str]]:
     try:
-        data = df if isinstance(df, pd.DataFrame) else inspect_schema_tool(df, engine)["df"]
+        data = df if isinstance(df, pd.DataFrame) else _inspect_schema(df, engine)["df"]
         pdf = data if isinstance(data, pd.DataFrame) else pd.DataFrame()
         if not isinstance(data, pd.DataFrame):
             try:
-                from source.engine import create_engine
-
                 pdf = create_engine(engine).to_pandas(data)
             except Exception:
                 pdf = pd.DataFrame()
@@ -143,12 +166,25 @@ def _append_artifact_metadata(run_context: dict[str, Any], artifact: dict[str, A
         run_context.setdefault("artifacts", []).append(artifact)
 
 
-def build_analytics_tools(run_context: dict[str, Any]) -> list[Callable[..., dict[str, str]]]:
-    """Create Deep Agent analytics tools bound to one run context."""
+def _runtime_run_state(
+    runtime: ToolRuntime[AnalyticaContext],
+    fallback_run_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if runtime is not None and getattr(runtime, "context", None) is not None:
+        return runtime.context.run_state
+    if fallback_run_context is not None:
+        return fallback_run_context
+    raise RuntimeError("Analytica runtime context is required for analytics tools.")
 
-    def inspect_dataset_schema() -> dict[str, str]:
+
+def build_analytics_tools(fallback_run_context: dict[str, Any] | None = None) -> list[Any]:
+    """Create DeepAgents analytics tools that read run data from ToolRuntime."""
+
+    @tool
+    def inspect_dataset_schema(runtime: ToolRuntime[AnalyticaContext]) -> dict[str, str]:
         """Inspect the dataset schema and resolve the compute engine."""
-        data_info = inspect_schema_tool(run_context["df"], run_context["engine"])
+        run_context = _runtime_run_state(runtime, fallback_run_context)
+        data_info = _inspect_schema(run_context["df"], run_context["engine"])
         run_context["df"] = data_info["df"]
         run_context["engine"] = data_info["engine"]
         run_context["schema"] = data_info["schema"]
@@ -157,8 +193,6 @@ def build_analytics_tools(run_context: dict[str, Any]) -> list[Callable[..., dic
         try:
             pdf = run_context["df"] if isinstance(run_context["df"], pd.DataFrame) else pd.DataFrame()
             if not isinstance(run_context["df"], pd.DataFrame):
-                from source.engine import create_engine
-
                 pdf = create_engine(run_context["engine"]).to_pandas(run_context["df"])
             run_context["data_profile"] = dataframe_profile(pdf)
         except Exception as exc:
@@ -179,16 +213,18 @@ def build_analytics_tools(run_context: dict[str, Any]) -> list[Callable[..., dic
             **fields,
         }
 
-    def run_python_analysis(code: str) -> dict[str, str]:
+    @tool
+    def run_python_analysis(code: str, runtime: ToolRuntime[AnalyticaContext]) -> dict[str, str]:
         """Execute Python analysis code against the current dataset.
 
         The code runs with the current table as `df`, pandas as `pd`, optional matplotlib
         as `plt`, and a helper `to_pandas`. Assign the final value to `result`.
         """
+        run_context = _runtime_run_state(runtime, fallback_run_context)
         if not run_context["schema"]:
-            inspect_dataset_schema()
+            inspect_dataset_schema.func(runtime)
         run_context["code"] = code
-        exec_out = execute_code_tool(code, run_context["df"], run_context["engine"])
+        exec_out = _execute_code(code, run_context["df"], run_context["engine"])
         run_context.update(exec_out)
         if not exec_out.get("exec_error"):
             _append_artifact_metadata(
@@ -209,9 +245,11 @@ def build_analytics_tools(run_context: dict[str, Any]) -> list[Callable[..., dic
             "has_result_base64": str(bool(exec_out.get("result_base64"))),
         }
 
+    @tool
     def top_n(
         dimension: str,
         metric: str,
+        runtime: ToolRuntime[AnalyticaContext],
         n: int = DEFAULT_TOP_N,
         agg: str = "sum",
         ascending: bool = False,
@@ -235,11 +273,13 @@ else:
         .reset_index(name={_quote(f"{agg}_{metric}")})
     )
 """.strip()
-        return run_python_analysis(code)
+        return run_python_analysis.func(code, runtime)
 
+    @tool
     def plot_bar(
         dimension: str,
         metric: str,
+        runtime: ToolRuntime[AnalyticaContext],
         n: int = DEFAULT_TOP_N,
         agg: str = "sum",
         title: str = "",
@@ -271,9 +311,11 @@ else:
         fig.tight_layout()
         result = fig
 """.strip()
-        return run_python_analysis(code)
+        return run_python_analysis.func(code, runtime)
 
+    @tool
     def find_drops(
+        runtime: ToolRuntime[AnalyticaContext],
         date_col: str = "",
         metric: str = "",
         n: int = DEFAULT_TOP_N,
@@ -287,8 +329,9 @@ else:
             n: Number of drops to return.
             date_format: Optional pandas datetime format if automatic parsing is not enough.
         """
+        run_context = _runtime_run_state(runtime, fallback_run_context)
         if not run_context["schema"]:
-            inspect_dataset_schema()
+            inspect_dataset_schema.func(runtime)
         fields = run_context.get("schema_fields", {})
         date_col = date_col or next(iter(fields.get("date_columns", [])), "")
         metric = metric or next(iter(fields.get("numeric_columns", [])), "")
@@ -323,12 +366,14 @@ result = (
     .head({n})
 )
 """.strip()
-        return run_python_analysis(code)
+        return run_python_analysis.func(code, runtime)
 
-    def list_dataframe_tables() -> dict[str, str]:
+    @tool
+    def list_dataframe_tables(runtime: ToolRuntime[AnalyticaContext]) -> dict[str, str]:
         """List SQL tables available for read-only DataFrame querying."""
+        run_context = _runtime_run_state(runtime, fallback_run_context)
         if not run_context["schema"]:
-            inspect_dataset_schema()
+            inspect_dataset_schema.func(runtime)
         pdf = run_context["df"] if isinstance(run_context["df"], pd.DataFrame) else None
         if pdf is None:
             from source.engine import create_engine
@@ -338,10 +383,15 @@ result = (
         _record_tool_event(run_context, "list_dataframe_tables", "ok", tables=", ".join(tables))
         return {"tables": ", ".join(tables)}
 
-    def describe_dataframe_table(table_name: str = "") -> dict[str, str]:
+    @tool
+    def describe_dataframe_table(
+        runtime: ToolRuntime[AnalyticaContext],
+        table_name: str = "",
+    ) -> dict[str, str]:
         """Return SQLite schema and sample rows for the current DataFrame table."""
+        run_context = _runtime_run_state(runtime, fallback_run_context)
         if not run_context["schema"]:
-            inspect_dataset_schema()
+            inspect_dataset_schema.func(runtime)
         pdf = run_context["df"] if isinstance(run_context["df"], pd.DataFrame) else None
         if pdf is None:
             from source.engine import create_engine
@@ -352,8 +402,10 @@ result = (
         _record_tool_event(run_context, "describe_dataframe_table", "ok", table_name=table_name or None)
         return {"schema": schema}
 
-    def check_dataframe_sql(query: str) -> dict[str, str]:
+    @tool
+    def check_dataframe_sql(query: str, runtime: ToolRuntime[AnalyticaContext]) -> dict[str, str]:
         """Validate a read-only SQL query before execution."""
+        run_context = _runtime_run_state(runtime, fallback_run_context)
         try:
             checked = validate_read_only_sql(query)
             checked_at = datetime.now().isoformat(timespec="seconds")
@@ -366,15 +418,21 @@ result = (
             _record_tool_event(run_context, "check_dataframe_sql", "error", error=str(exc))
             return {"valid": "false", "query": query, "checked_at": checked_at, "error": str(exc)}
 
-    def query_dataframe_sql(query: str, table_name: str = "") -> dict[str, str]:
+    @tool
+    def query_dataframe_sql(
+        query: str,
+        runtime: ToolRuntime[AnalyticaContext],
+        table_name: str = "",
+    ) -> dict[str, str]:
         """Execute a read-only SQL query against the current DataFrame.
 
         Use `list_dataframe_tables`, `describe_dataframe_table`, and
         `check_dataframe_sql` before this tool, following the LangChain SQL-agent
         pattern. The default table name comes from configuration.
         """
+        run_context = _runtime_run_state(runtime, fallback_run_context)
         if not run_context["schema"]:
-            inspect_dataset_schema()
+            inspect_dataset_schema.func(runtime)
         pdf = run_context["df"] if isinstance(run_context["df"], pd.DataFrame) else None
         if pdf is None:
             from source.engine import create_engine
@@ -454,12 +512,19 @@ result = (
             "query": checked,
         }
 
-    def run_bar_command(command: str) -> dict[str, str]:
+    @tool
+    def run_bar_command(command: str, runtime: ToolRuntime[AnalyticaContext]) -> dict[str, str]:
         """Execute a supported /bar command string."""
         code = _bar_codegen(command)
-        return run_python_analysis(code)
+        return run_python_analysis.func(code, runtime)
 
-    def write_report_artifact(title: str, markdown: str, file_name: str = "") -> dict[str, str]:
+    @tool
+    def write_report_artifact(
+        title: str,
+        markdown: str,
+        runtime: ToolRuntime[AnalyticaContext],
+        file_name: str = "",
+    ) -> dict[str, str]:
         """Save a markdown report artifact outside the code execution sandbox.
 
         Args:
@@ -467,6 +532,7 @@ result = (
             markdown: Complete markdown content to save.
             file_name: Optional file name. If empty, a safe name is generated.
         """
+        run_context = _runtime_run_state(runtime, fallback_run_context)
         ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
         safe_name = _slug(file_name or title, fallback="report")
         if not safe_name.endswith(".md"):

@@ -1,7 +1,6 @@
 ---
-name: data_analysis
+name: data-analysis
 description: General workflow for answering questions from the current dataset using schema-first analysis and tool-grounded facts.
-allowed-tools: inspect_dataset_schema, top_n, find_drops, run_python_analysis, write_report_artifact
 ---
 
 # Data Analysis

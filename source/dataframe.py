@@ -31,12 +31,17 @@ def read_csv_dataset(path: str | Path, **kwargs: Any) -> pd.DataFrame:
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
     if not csv_path.is_file():
         raise ValueError(f"CSV path is not a file: {csv_path}")
+    read_kwargs = dict(kwargs)
     try:
-        return pd.read_csv(csv_path, **kwargs)
+        return pd.read_csv(csv_path, **read_kwargs)
     except pd.errors.ParserError:
-        retry_kwargs = dict(kwargs)
+        retry_kwargs = dict(read_kwargs)
         retry_kwargs.setdefault("escapechar", chr(92))
-        return pd.read_csv(csv_path, **retry_kwargs)
+        try:
+            return pd.read_csv(csv_path, **retry_kwargs)
+        except pd.errors.ParserError:
+            retry_kwargs.setdefault("on_bad_lines", "skip")
+            return pd.read_csv(csv_path, **retry_kwargs)
 
 
 def dataframe_profile(df: pd.DataFrame, *, sample_rows: int = 5) -> dict[str, Any]:

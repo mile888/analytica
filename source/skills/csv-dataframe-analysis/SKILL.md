@@ -1,7 +1,6 @@
 ---
-name: csv_dataframe_analysis
+name: csv-dataframe-analysis
 description: CSV loading assumptions and pandas DataFrame workflow for schema inspection, profiling, column-safe transformations, and exploratory analysis.
-allowed-tools: inspect_dataset_schema, top_n, find_drops, run_python_analysis
 ---
 
 # CSV DataFrame Analysis

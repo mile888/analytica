@@ -1,7 +1,6 @@
 ---
-name: code_execution_safety
+name: code-execution-safety
 description: Safety policy for generated Python analysis code executed against the current dataset.
-allowed-tools: run_python_analysis
 ---
 
 # Code Execution Safety

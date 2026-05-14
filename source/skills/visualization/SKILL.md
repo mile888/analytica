@@ -1,7 +1,6 @@
 ---
 name: visualization
 description: Chart and plot creation from current dataset columns, including bar, grouped, stacked, share, and custom matplotlib visualizations.
-allowed-tools: inspect_dataset_schema, plot_bar, run_bar_command, run_python_analysis, write_report_artifact
 ---
 
 # Visualization

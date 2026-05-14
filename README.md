@@ -150,16 +150,21 @@ Open the notebook demo:
 jupyter notebook notebooks/analytica_agent_demo.ipynb
 ```
 
+DeepAgents setup smoke/debug notebook:
+
+```bash
+jupyter notebook notebooks/test_.ipynb
+```
+
 ## Architecture
 
-- `source/agent.py` builds the Deep Agent, system prompt, streaming wrapper, structured report schema, and optional LangSmith metadata.
+- `source/agent.py` builds the official DeepAgents SDK agent with `create_deep_agent`, project skill sources, filesystem-backed memory, a composite DeepAgents backend, streaming wrapper, structured report schema, and optional LangSmith metadata.
 - `source/checkpointing.py` selects the LangGraph checkpointer: in-memory by default, optional SQLite persistence via env.
-- `source/skills/registry.py` exposes progressive-disclosure skill metadata and full skill content lookup.
 - `source/tools/analytics_tools.py` exposes schema, Python analysis, SQL, visualization, and report tools.
-- `source/tools/skill_tools.py` exposes `list_available_skills` and `load_skill` so the agent loads full skill content only on demand.
 - `source/func.py` contains controlled code execution and result previews.
 - `source/dataframe.py` contains CSV loading, DataFrame profiling, and read-only SQLite querying.
-- `source/skills/*/SKILL.md` stores skill metadata (`name`, `description`, `allowed-tools`) plus full instructions for data analysis, CSV/DataFrame work, SQL querying, visualization, reporting, business analysis, and code execution safety.
+- `source/skills/*/SKILL.md` stores official DeepAgents skill folders with `name` and `description` frontmatter. The agent receives these through `skills=["/source/skills/"]`; DeepAgents reads the matching `SKILL.md` files through its built-in Skills System.
+- `.analytica/memory/AGENTS.md` is the local filesystem-backed DeepAgents memory file exposed to the agent as `/memories/AGENTS.md`.
 - `app.py` shows streaming progress when available and falls back to the stable `run_once` path if streaming is unavailable.
 - `run.py` and `main.py` keep the CLI and API entrypoints compatible with the existing non-streaming call.
 

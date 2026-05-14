@@ -45,6 +45,8 @@ def resolve_project_path(value: str | Path, *, base: Path = PROJECT_ROOT) -> Pat
 DEFAULT_DATA_PATH = PROJECT_ROOT / env_str("ANALYTICA_DEFAULT_DATA_PATH", "data/train.csv")
 SKILL_DIR = PROJECT_ROOT / env_str("ANALYTICA_SKILL_DIR", "source/skills")
 ARTIFACT_DIR = PROJECT_ROOT / env_str("ANALYTICA_ARTIFACT_DIR", "artifacts")
+DEEPAGENTS_MEMORY_DIR = resolve_project_path(env_str("ANALYTICA_DEEPAGENTS_MEMORY_DIR", ".analytica/memory"))
+DEEPAGENTS_MEMORY_FILE = env_str("ANALYTICA_DEEPAGENTS_MEMORY_FILE", "/memories/AGENTS.md")
 MPLCONFIGDIR = Path(env_str("ANALYTICA_MPLCONFIGDIR", "/tmp/analytica-matplotlib"))
 MPLBACKEND = env_str("ANALYTICA_MPLBACKEND", "Agg")
 LLM_CONFIG_PATH = resolve_project_path(env_str("ANALYTICA_LLM_CONFIG_PATH", "llm_config.yaml"))
@@ -78,7 +80,6 @@ SQL_TOP_N_SUGGESTION_TEMPLATE = env_str(
     "ANALYTICA_SQL_TOP_N_SUGGESTION_TEMPLATE",
     "Через SQL найди топ-5 `{dimension}` по сумме `{metric}`",
 )
-MAX_HISTORY_MESSAGES = env_int("ANALYTICA_MAX_HISTORY_MESSAGES", 12, minimum=0, maximum=100)
 MAX_TOOL_ROWS = env_int("ANALYTICA_MAX_TOOL_ROWS", 50, minimum=1, maximum=500)
 DEFAULT_TOP_N = env_int("ANALYTICA_DEFAULT_TOP_N", 10, minimum=1, maximum=500)
 MAX_TOP_N = env_int("ANALYTICA_MAX_TOP_N", 50, minimum=1, maximum=5000)

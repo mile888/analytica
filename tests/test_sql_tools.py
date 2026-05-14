@@ -1,7 +1,24 @@
 import pandas as pd
+from langchain.tools import ToolRuntime
 
 from source.dataframe import validate_read_only_sql
+from source.runtime_context import AnalyticaContext
 from source.tools.analytics_tools import build_analytics_tools
+
+
+def _runtime(run_context):
+    return ToolRuntime(
+        state={},
+        context=AnalyticaContext(run_state=run_context),
+        config={},
+        stream_writer=lambda _: None,
+        tool_call_id=None,
+        store=None,
+    )
+
+
+def _invoke(tool, runtime, **kwargs):
+    return tool.invoke({**kwargs, "runtime": runtime})
 
 
 def _analytics_tools():
@@ -17,16 +34,16 @@ def _analytics_tools():
         "schema": "",
         "loaded_skills": [],
     }
-    return context, {tool.__name__: tool for tool in build_analytics_tools(context)}
+    return context, {tool.name: tool for tool in build_analytics_tools(context)}, _runtime(context)
 
 
 def test_sql_query_requires_exact_check_before_execution():
-    _, tools = _analytics_tools()
+    _, tools, runtime = _analytics_tools()
     query = "SELECT segment, SUM(metric) AS total FROM data GROUP BY segment"
 
-    first_attempt = tools["query_dataframe_sql"](query)
-    checked = tools["check_dataframe_sql"](query)
-    second_attempt = tools["query_dataframe_sql"](query)
+    first_attempt = _invoke(tools["query_dataframe_sql"], runtime, query=query)
+    checked = _invoke(tools["check_dataframe_sql"], runtime, query=query)
+    second_attempt = _invoke(tools["query_dataframe_sql"], runtime, query=query)
 
     assert "Call check_dataframe_sql" in first_attempt["exec_error"]
     assert checked["valid"] == "true"
@@ -35,11 +52,11 @@ def test_sql_query_requires_exact_check_before_execution():
 
 
 def test_sql_metadata_is_returned_and_stored():
-    context, tools = _analytics_tools()
+    context, tools, runtime = _analytics_tools()
     query = "SELECT segment, SUM(metric) AS total FROM data GROUP BY segment ORDER BY total DESC"
 
-    tools["check_dataframe_sql"](query)
-    result = tools["query_dataframe_sql"](query)
+    _invoke(tools["check_dataframe_sql"], runtime, query=query)
+    result = _invoke(tools["query_dataframe_sql"], runtime, query=query)
 
     assert result["table_name"] == "data"
     assert result["query"] == query
@@ -73,9 +90,9 @@ def test_read_only_validation_blocks_mutating_sql():
 
 
 def test_check_dataframe_sql_reports_blocked_query():
-    _, tools = _analytics_tools()
+    _, tools, runtime = _analytics_tools()
 
-    result = tools["check_dataframe_sql"]("DROP TABLE data")
+    result = _invoke(tools["check_dataframe_sql"], runtime, query="DROP TABLE data")
 
     assert result["valid"] == "false"
     assert result["checked_at"]

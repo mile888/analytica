@@ -8,14 +8,22 @@ import warnings
 import pandas as pd
 
 from source.checkpointing import get_checkpointer
-from source.config import ANALYTICA_THREAD_ID, LANGSMITH_TRACING_ENABLED, MAX_HISTORY_MESSAGES, THREAD_PREFIX
+from source.config import (
+    ANALYTICA_THREAD_ID,
+    ARTIFACT_DIR,
+    DEEPAGENTS_MEMORY_DIR,
+    DEEPAGENTS_MEMORY_FILE,
+    LANGSMITH_TRACING_ENABLED,
+    PROJECT_ROOT,
+    SKILL_DIR,
+    THREAD_PREFIX,
+)
 from source.dataframe import dataframe_profile
 from source.engine import create_engine
 from source.llm.factory import make_llm
 from source.llm.llm_config import load_llm_config
-from source.skills.registry import load_skill_registry, skill_descriptions_text
+from source.runtime_context import AnalyticaContext
 from source.tools.analytics_tools import build_analytics_tools
-from source.tools.skill_tools import build_skill_tools
 
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
@@ -26,33 +34,74 @@ else:
 def _get_deep_agent_runtime():
     try:
         from deepagents import create_deep_agent
+        from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "Deep Agent dependencies are not installed. Run project setup first "
             "(`make setup` or install requirements.txt), then retry."
         ) from exc
 
-    return create_deep_agent, get_checkpointer()
+    return create_deep_agent, CompositeBackend, StateBackend, FilesystemBackend, get_checkpointer()
 
 
 def _tool_name(tool: Any) -> str:
     return getattr(tool, "name", None) or getattr(tool, "__name__", type(tool).__name__)
 
 
-def _build_system_prompt(tool_names: list[str], skills_text: str) -> str:
+def _deep_agent_skill_sources() -> list[str]:
+    relative = SKILL_DIR.relative_to(PROJECT_ROOT)
+    return ["/" + relative.as_posix().rstrip("/") + "/"]
+
+
+def _deep_agent_memory_files() -> list[str]:
+    memory_path = DEEPAGENTS_MEMORY_FILE.strip() or "/memories/AGENTS.md"
+    if not memory_path.startswith("/"):
+        memory_path = "/" + memory_path
+    return [memory_path]
+
+
+def _ensure_deep_agent_memory_file() -> None:
+    DEEPAGENTS_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    memory_file = _deep_agent_memory_files()[0]
+    if memory_file.startswith("/memories/"):
+        relative_memory_file = memory_file.removeprefix("/memories/")
+    else:
+        relative_memory_file = memory_file.lstrip("/")
+    memory_path = DEEPAGENTS_MEMORY_DIR / (relative_memory_file or "AGENTS.md")
+    if memory_path.exists():
+        return
+
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text(
+        "# Analytica Agent Memory\n\n"
+        "Use this file for durable, high-signal memory that should persist across "
+        "agent runs, such as stable user preferences, durable dataset caveats, "
+        "or reusable analysis guidance.\n\n"
+        "Do not store every raw message, transient tool output, or large artifacts here.\n",
+        encoding="utf-8",
+    )
+
+
+def _build_deep_agent_backend(CompositeBackend: Any, StateBackend: Any, FilesystemBackend: Any) -> Any:
+    _ensure_deep_agent_memory_file()
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    return CompositeBackend(
+        default=StateBackend(),
+        routes={
+            "/artifacts/": FilesystemBackend(root_dir=str(ARTIFACT_DIR), virtual_mode=True),
+            "/memories/": FilesystemBackend(root_dir=str(DEEPAGENTS_MEMORY_DIR), virtual_mode=True),
+            "/source/skills/": FilesystemBackend(root_dir=str(PROJECT_ROOT / "source" / "skills"), virtual_mode=True),
+        },
+    )
+
+
+def _build_system_prompt(tool_names: list[str]) -> str:
     tools = ", ".join(f"`{name}`" for name in tool_names)
     return f"""Ты Deep Agent для анализа данных, CSV/DataFrame, SQL-style запросов, визуализаций и бизнес-выводов.
 
-Работай по progressive disclosure:
-- В system prompt есть только краткие описания skills.
-- Если задача требует специальных правил, сначала вызови `load_skill` для одного или нескольких релевантных skills.
-- Не предполагай полное содержание skill, пока не загрузил его.
-- Не загружай все skills без необходимости.
+Используй официальные DeepAgents skills, memory и filesystem backend. Долгосрочная память доступна через `/memories/`, а промежуточные материалы и длинные результаты нужно хранить в `/artifacts/`, а не повторять в ответах.
 
-Available skills:
-{skills_text}
-
-Available tools: {tools}.
+Custom analytics tools: {tools}.
 
 Core rules:
 1. Для фактов из данных сначала используй schema/table inspection tools.
@@ -67,9 +116,7 @@ def _history_as_deepagent_messages(
     messages: Optional[list[BaseMessage]],
 ) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
-    history_window = MAX_HISTORY_MESSAGES if MAX_HISTORY_MESSAGES > 0 else 0
-    recent_messages = (messages or [])[-history_window:] if history_window else []
-    for msg in recent_messages:
+    for msg in messages or []:
         msg_type = getattr(msg, "type", "")
         role = "assistant" if msg_type == "ai" else "user"
         content = str(getattr(msg, "content", "") or "")
@@ -77,13 +124,6 @@ def _history_as_deepagent_messages(
             out.append({"role": role, "content": content})
     out.append({"role": "user", "content": query})
     return out
-
-
-def _skill_tool_registry() -> dict[str, list[str]]:
-    return {
-        skill.name: list(skill.allowed_tools)
-        for skill in load_skill_registry().values()
-    }
 
 
 def _guess_skills(query: str) -> list[str]:
@@ -102,6 +142,26 @@ def _guess_skills(query: str) -> list[str]:
         "таблиц",
         "колон",
         "данн",
+        "выруч",
+        "приб",
+        "продаж",
+        "маржин",
+        "сегмент",
+        "клиент",
+        "заказ",
+        "категор",
+        "регион",
+        "город",
+        "profit",
+        "revenue",
+        "sales",
+        "margin",
+        "segment",
+        "customer",
+        "order",
+        "category",
+        "region",
+        "city",
         "dataset",
         "csv",
         "dataframe",
@@ -116,37 +176,45 @@ def _guess_skills(query: str) -> list[str]:
     needs_sql = any(marker in q for marker in sql_markers)
     needs_data = needs_visual or needs_sql or any(marker in q for marker in data_markers)
     if not needs_data:
-        return ["business_analysis", "reporting"]
+        return ["business-analysis", "reporting"]
 
-    skills = ["data_analysis", "csv_dataframe_analysis"]
+    skills = ["data-analysis", "csv-dataframe-analysis"]
     if needs_sql:
-        skills.append("sql_querying")
+        skills.append("sql-querying")
     if needs_visual:
         skills.append("visualization")
     if any(marker in q for marker in code_markers):
-        skills.append("code_execution_safety")
+        skills.append("code-execution-safety")
     skills.append("reporting")
     return skills
 
 
 def _tools_for_skills(skills: list[str]) -> list[str]:
-    tools: list[str] = []
-    registry = _skill_tool_registry()
+    tool_map = {
+        "business-analysis": [],
+        "code-execution-safety": ["run_python_analysis"],
+        "csv-dataframe-analysis": ["inspect_dataset_schema", "top_n", "find_drops", "run_python_analysis"],
+        "data-analysis": ["inspect_dataset_schema", "top_n", "find_drops", "run_python_analysis", "write_report_artifact"],
+        "reporting": ["write_report_artifact"],
+        "sql-querying": ["list_dataframe_tables", "describe_dataframe_table", "check_dataframe_sql", "query_dataframe_sql"],
+        "visualization": ["inspect_dataset_schema", "plot_bar", "run_bar_command", "run_python_analysis", "write_report_artifact"],
+    }
+    out: list[str] = []
     for skill in skills:
-        for tool in registry.get(skill, []):
-            if tool not in tools:
-                tools.append(tool)
-    return tools
+        for tool in tool_map.get(skill, []):
+            if tool not in out:
+                out.append(tool)
+    return out
 
 
 def _query_type(selected_skills: list[str]) -> str:
     if "visualization" in selected_skills:
         return "visualization"
-    if "sql_querying" in selected_skills:
+    if "sql-querying" in selected_skills:
         return "sql"
-    if "data_analysis" in selected_skills:
-        return "data_analysis"
-    return "business_analysis"
+    if "data-analysis" in selected_skills:
+        return "data-analysis"
+    return "business-analysis"
 
 
 def _llm_trace_info() -> dict[str, str]:
@@ -199,10 +267,27 @@ def _agent_config(thread_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def _agent_runtime_context(
+    run_context: dict[str, Any],
+    thread_id: str,
+    *,
+    user_id: str = "local",
+    session_id: str = "",
+    run_id: str = "",
+) -> AnalyticaContext:
+    return AnalyticaContext(
+        user_id=user_id,
+        thread_id=thread_id,
+        session_id=session_id or thread_id,
+        run_id=run_id,
+        artifact_dir=str(ARTIFACT_DIR),
+        memory_file=_deep_agent_memory_files()[0],
+        run_state=run_context,
+    )
+
+
 def _stage_for_tool(tool_name: str) -> str:
     mapping = {
-        "load_skill": "skill_loading",
-        "list_available_skills": "skill_loading",
         "inspect_dataset_schema": "schema_inspection",
         "list_dataframe_tables": "schema_inspection",
         "describe_dataframe_table": "schema_inspection",
@@ -373,7 +458,7 @@ def _schema_overview_response(
             "columns": profile["columns_count"],
         }
     ]
-    loaded_skills = [skill for skill in ("data_analysis", "csv_dataframe_analysis", "reporting") if skill in selected_skills]
+    loaded_skills = [skill for skill in ("data-analysis", "csv-dataframe-analysis", "reporting") if skill in selected_skills]
     run_context = {
         "query": query,
         "code": "",
@@ -441,8 +526,8 @@ def _error_response(
         "result_base64": "",
         "exec_error": reason,
         "engine": engine,
-        "needs_data": "data_analysis" in selected_skills or "visualization" in selected_skills,
-        "use_case": "data_analytics" if "data_analysis" in selected_skills else "business_analytics",
+        "needs_data": "data-analysis" in selected_skills or "visualization" in selected_skills,
+        "use_case": "data_analytics" if "data-analysis" in selected_skills else "business_analytics",
         "selected_skills": selected_skills,
         "selected_tools": _tools_for_skills(selected_skills),
         "loaded_skills": [],
@@ -456,7 +541,7 @@ def _error_response(
 
 def build_deep_agent(df: Any, query: str, engine: str = "auto"):
     """Create a Deep Agent plus a mutable run context for compatibility output."""
-    create_deep_agent, checkpointer = _get_deep_agent_runtime()
+    create_deep_agent, CompositeBackend, StateBackend, FilesystemBackend, checkpointer = _get_deep_agent_runtime()
     run_context: dict[str, Any] = {
         "query": query,
         "df": df,
@@ -473,13 +558,17 @@ def build_deep_agent(df: Any, query: str, engine: str = "auto"):
         "tool_timeline": [],
     }
 
-    tools = build_skill_tools(run_context) + build_analytics_tools(run_context)
+    tools = build_analytics_tools()
     tool_names = [_tool_name(tool) for tool in tools]
 
     agent = create_deep_agent(
         model=make_llm("deep_agent"),
         tools=tools,
-        system_prompt=_build_system_prompt(tool_names, skill_descriptions_text()),
+        system_prompt=_build_system_prompt(tool_names),
+        skills=_deep_agent_skill_sources(),
+        memory=_deep_agent_memory_files(),
+        backend=_build_deep_agent_backend(CompositeBackend, StateBackend, FilesystemBackend),
+        context_schema=AnalyticaContext,
         checkpointer=checkpointer,
     )
     return agent, run_context
@@ -516,6 +605,7 @@ def run_agent(
         result = agent.invoke(
             {"messages": input_messages},
             config=_agent_config(resolved_thread_id, trace_metadata),
+            context=_agent_runtime_context(run_context, resolved_thread_id),
         )
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
@@ -525,7 +615,7 @@ def run_agent(
 
     result_messages = result.get("messages", []) if isinstance(result, dict) else []
     final_answer = _message_content(result_messages[-1]) if result_messages else ""
-    needs_data = "data_analysis" in selected_skills or "visualization" in selected_skills
+    needs_data = "data-analysis" in selected_skills or "visualization" in selected_skills
     no_tool_result = not run_context.get("code") and not run_context.get("result_preview") and not run_context.get("result_base64")
     if (needs_data and no_tool_result) or _looks_like_failed_agent_answer(final_answer):
         reason = "Deep Agent did not produce an analytics tool result."
@@ -556,7 +646,7 @@ def run_agent(
         "exec_error": run_context.get("exec_error"),
         "engine": run_context.get("engine", engine),
         "needs_data": needs_data,
-        "use_case": "data_analytics" if "data_analysis" in selected_skills else "business_analytics",
+        "use_case": "data_analytics" if "data-analysis" in selected_skills else "business_analytics",
         "selected_skills": selected_skills,
         "selected_tools": selected_tools,
         "loaded_skills": loaded_skills,
@@ -650,9 +740,19 @@ def run_agent_stream(
         result: Any = None
 
         try:
-            chunks = agent.stream({"messages": input_messages}, config=config, stream_mode="values")
+            runtime_context = _agent_runtime_context(run_context, resolved_thread_id)
+            chunks = agent.stream(
+                {"messages": input_messages},
+                config=config,
+                context=runtime_context,
+                stream_mode="values",
+            )
         except TypeError:
-            chunks = agent.stream({"messages": input_messages}, config=config)
+            chunks = agent.stream(
+                {"messages": input_messages},
+                config=config,
+                context=_agent_runtime_context(run_context, resolved_thread_id),
+            )
 
         for chunk in chunks:
             if isinstance(chunk, dict):
@@ -671,7 +771,7 @@ def run_agent_stream(
 
         result_messages = result.get("messages", [])
         final_answer = _message_content(result_messages[-1]) if result_messages else ""
-        needs_data = "data_analysis" in selected_skills or "visualization" in selected_skills
+        needs_data = "data-analysis" in selected_skills or "visualization" in selected_skills
         no_tool_result = not run_context.get("code") and not run_context.get("result_preview") and not run_context.get("result_base64")
         if (needs_data and no_tool_result) or _looks_like_failed_agent_answer(final_answer):
             raise RuntimeError("Deep Agent stream did not produce an analytics tool result.")
@@ -693,7 +793,7 @@ def run_agent_stream(
             "exec_error": run_context.get("exec_error"),
             "engine": run_context.get("engine", engine),
             "needs_data": needs_data,
-            "use_case": "data_analytics" if "data_analysis" in selected_skills else "business_analytics",
+            "use_case": "data_analytics" if "data-analysis" in selected_skills else "business_analytics",
             "selected_skills": selected_skills,
             "selected_tools": selected_tools,
             "loaded_skills": loaded_skills,

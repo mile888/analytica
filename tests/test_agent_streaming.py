@@ -13,9 +13,9 @@ def test_run_agent_stream_falls_back_to_run_agent(monkeypatch):
         "engine": "pandas",
         "needs_data": True,
         "use_case": "data_analytics",
-        "selected_skills": ["data_analysis"],
+        "selected_skills": ["data-analysis"],
         "selected_tools": ["inspect_dataset_schema"],
-        "loaded_skills": ["data_analysis"],
+        "loaded_skills": ["data-analysis"],
         "tool_timeline": [{"tool": "inspect_dataset_schema", "status": "ok"}],
         "sql_metadata": {},
         "structured_report": {"summary": "ok"},
@@ -55,7 +55,7 @@ def test_structured_report_schema_contains_expected_fields():
             "artifacts": [{"path": "artifacts/report.md"}],
             "exec_error": None,
         },
-        loaded_skills=["data_analysis"],
+        loaded_skills=["data-analysis"],
         tool_timeline=[{"tool": "inspect_dataset_schema", "status": "ok"}],
         sql_metadata={"row_count": 1},
     )
@@ -73,4 +73,4 @@ def test_structured_report_schema_contains_expected_fields():
     }
     assert report["summary"] == "Summary"
     assert report["generated_code"] == "result = df.head()"
-    assert report["loaded_skills"] == ["data_analysis"]
+    assert report["loaded_skills"] == ["data-analysis"]

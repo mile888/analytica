@@ -1,7 +1,6 @@
 ---
-name: sql_querying
+name: sql-querying
 description: Read-only SQL-style querying over the current pandas DataFrame through an in-memory SQLite table.
-allowed-tools: list_dataframe_tables, describe_dataframe_table, check_dataframe_sql, query_dataframe_sql
 ---
 
 # SQL Querying

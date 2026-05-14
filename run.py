@@ -1,4 +1,4 @@
-"""Quick CLI runner for the analytics agent pipeline.
+"""Quick CLI runner for the DeepAgents analytics agent.
 
 Usage:
     python run.py --csv path/to/file.csv --query "Опиши структуру данных"

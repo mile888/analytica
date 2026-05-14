@@ -1,7 +1,6 @@
 ---
-name: business_analysis
+name: business-analysis
 description: Business interpretation, metric design, hypotheses, recommendations, and analytical framing when no direct dataset calculation is required.
-allowed-tools:
 ---
 
 # Business Analysis
@@ -14,7 +13,7 @@ Use this skill for strategy, interpretation, metric design, hypotheses, decision
 2. Separate facts from assumptions.
 3. Suggest useful metrics, segments, and validation checks.
 4. Keep recommendations practical and concise.
-5. If the user asks for dataset-backed numbers, switch to `data_analysis` or `csv_dataframe_analysis`.
+5. If the user asks for dataset-backed numbers, switch to `data-analysis` or `csv-dataframe-analysis`.
 
 ## Rules
 - Do not claim that data was analyzed unless a data tool was called.

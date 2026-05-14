@@ -1,4 +1,5 @@
 import pandas as pd
+from pathlib import Path
 
 from app import infer_demo_suggestions
 
@@ -19,3 +20,8 @@ def test_demo_suggestions_prefer_business_metric_over_id_columns():
     assert "Sales" in joined
     assert "Category" in joined
     assert "Row ID" not in joined
+
+
+def test_published_reports_page_compiles():
+    source = Path("pages/Published_Reports.py").read_text(encoding="utf-8")
+    compile(source, "pages/Published_Reports.py", "exec")
