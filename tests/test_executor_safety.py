@@ -6,15 +6,15 @@ from source.func import preview_result_and_facts, safe_exec
 def _df():
     return pd.DataFrame(
         {
-            "segment": ["A", "B", "A", "B"],
-            "metric": [10, 20, 15, 5],
+            "category_label": ["A", "B", "A", "B"],
+            "metric_value": [10, 20, 15, 5],
         }
     )
 
 
 def test_safe_pandas_analysis_ok():
     result, err = safe_exec(
-        "result = df.groupby('segment')['metric'].sum().reset_index()",
+        "result = df.groupby('category_label')['metric_value'].sum().reset_index()",
         _df(),
         "pandas",
     )
@@ -22,14 +22,14 @@ def test_safe_pandas_analysis_ok():
 
     assert err is None
     assert kind == "dataframe"
-    assert "segment" in preview
+    assert "category_label" in preview
     assert not b64
 
 
 def test_matplotlib_analysis_ok():
     code = """
 fig, ax = plt.subplots()
-df.groupby('segment')['metric'].sum().plot(kind='bar', ax=ax)
+df.groupby('category_label')['metric_value'].sum().plot(kind='bar', ax=ax)
 result = fig
 """.strip()
 
@@ -46,7 +46,7 @@ def test_executor_blocks_file_and_unsafe_imports():
     blocked_cases = {
         "open": "result = open('README.md').read()",
         "import_os": "import os\nresult = os.getcwd()",
-        "read_csv": "result = pd.read_csv('data/train.csv')",
+        "read_csv": "result = pd.read_csv('data/example.csv')",
     }
 
     for name, code in blocked_cases.items():
@@ -56,7 +56,7 @@ def test_executor_blocks_file_and_unsafe_imports():
 
 
 def test_executor_requires_result_variable():
-    result, err = safe_exec("df.groupby('segment')['metric'].sum()", _df(), "pandas")
+    result, err = safe_exec("df.groupby('category_label')['metric_value'].sum()", _df(), "pandas")
 
     assert result is None
     assert "result" in err

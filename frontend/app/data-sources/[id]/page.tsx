@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { getDataSource, getDataSourceProfile, getUsageContext } from "@/lib/api";
+import { DeleteDataSourceAction } from "@/components/DeleteActions";
 import { Card, EmptyState, StatusBadge, formatDate } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
@@ -23,13 +24,10 @@ export default async function DataSourceDetailPage({ params }: { params: Promise
         <header className="space-y-3">
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-semibold tracking-tight text-ink">{source.name}</h1>
-            <StatusBadge value={source.status} />
           </div>
-          <p className="text-sm text-slate-600">{source.description || "No description yet."}</p>
+          {source.description ? <p className="text-sm text-slate-600">{source.description}</p> : null}
           <div className="flex flex-wrap gap-2 text-xs text-slate-500">
-            <span>{source.data_source_type}</span>
-            {source.location ? <span>{source.location}</span> : null}
-            <span>Updated {formatDate(source.updated_at)}</span>
+            <span>Created {formatDate(source.created_at)}</span>
             <span>{source.linked_investigation_ids.length} linked investigations</span>
           </div>
         </header>
@@ -38,6 +36,11 @@ export default async function DataSourceDetailPage({ params }: { params: Promise
           <h2 className="text-sm font-semibold text-slate-950">Profile summary</h2>
           {profile ? (
             <>
+              {mayBeSingleColumnParse(profile) ? (
+                <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                  This dataset may be parsed as a single column. Check delimiter or re-upload with correct CSV settings.
+                </div>
+              ) : null}
               <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <Metric label="Rows" value={profile.row_count} />
                 <Metric label="Columns" value={profile.column_count} />
@@ -67,27 +70,30 @@ export default async function DataSourceDetailPage({ params }: { params: Promise
                 </table>
               </div>
               {profile.sampled_rows.length ? (
-                <div className="mt-4 overflow-auto rounded-md border border-slate-200">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-50 text-slate-500">
-                      <tr>
-                        {Object.keys(profile.sampled_rows[0]).slice(0, 8).map((key) => (
-                          <th key={key} className="px-3 py-2">{key}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {profile.sampled_rows.slice(0, 5).map((row, index) => (
-                        <tr key={index} className="border-t border-slate-100">
+                <div className="mt-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Preview</h3>
+                  <div className="mt-2 overflow-auto rounded-md border border-slate-200">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 text-slate-500">
+                        <tr>
                           {Object.keys(profile.sampled_rows[0]).slice(0, 8).map((key) => (
-                            <td key={key} className="max-w-[180px] truncate px-3 py-2 text-slate-600">
-                              {String(row[key] ?? "")}
-                            </td>
+                            <th key={key} className="px-3 py-2">{key}</th>
                           ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {profile.sampled_rows.slice(0, 5).map((row, index) => (
+                          <tr key={index} className="border-t border-slate-100">
+                            {Object.keys(profile.sampled_rows[0]).slice(0, 8).map((key) => (
+                              <td key={key} className="max-w-[180px] truncate px-3 py-2 text-slate-600">
+                                {String(row[key] ?? "")}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               ) : null}
             </>
@@ -97,53 +103,63 @@ export default async function DataSourceDetailPage({ params }: { params: Promise
         </Card>
 
         <Card>
-          <h2 className="text-sm font-semibold text-slate-950">Usage context</h2>
-          {context ? (
-            <div className="mt-3 space-y-4">
-              {context.description ? <p className="text-sm text-slate-600">{context.description}</p> : null}
-              <div className="grid gap-2">
-                {context.column_summaries.slice(0, 14).map((column) => (
-                  <div key={column.name} className="rounded-md border border-slate-200 p-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium text-slate-900">{column.name}</span>
-                      <StatusBadge value={column.inferred_role} />
-                      <span className="text-xs text-slate-500">{column.dtype}</span>
-                    </div>
-                    {column.notes.length ? (
-                      <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600">
-                        {column.notes.slice(0, 3).map((note) => <li key={note}>{note}</li>)}
-                      </ul>
-                    ) : null}
+          <details>
+            <summary className="cursor-pointer text-sm font-semibold text-slate-950">Dataset details</summary>
+            {context ? (
+              <div className="mt-4 space-y-5">
+                {context.description ? <p className="text-sm text-slate-600">{context.description}</p> : null}
+                <div>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Column roles</h3>
+                  <div className="mt-2 grid gap-2">
+                    {context.column_summaries.slice(0, 14).map((column) => (
+                      <div key={column.name} className="rounded-md border border-slate-200 p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium text-slate-900">{column.name}</span>
+                          <StatusBadge value={column.inferred_role} />
+                          <span className="text-xs text-slate-500">{column.dtype}</span>
+                        </div>
+                        {column.notes.length ? (
+                          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600">
+                            {column.notes.slice(0, 3).map((note) => <li key={note}>{note}</li>)}
+                          </ul>
+                        ) : null}
+                      </div>
+                    ))}
                   </div>
-                ))}
+                </div>
+                {context.caveats.length ? (
+                  <div>
+                    <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Caveats</h3>
+                    <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-slate-600">
+                      {context.caveats.map((caveat) => <li key={caveat}>{caveat}</li>)}
+                    </ul>
+                  </div>
+                ) : null}
+                {context.previous_questions.length ? (
+                  <div>
+                    <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Previous questions</h3>
+                    <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-slate-600">
+                      {context.previous_questions.map((question) => <li key={question}>{question}</li>)}
+                    </ul>
+                  </div>
+                ) : null}
               </div>
-            </div>
-          ) : (
-            <EmptyState>No usage context available.</EmptyState>
-          )}
+            ) : (
+              <div className="mt-4">
+                <EmptyState>No additional dataset details are available.</EmptyState>
+              </div>
+            )}
+          </details>
         </Card>
       </div>
 
       <aside className="space-y-4">
         <Card>
-          <h2 className="text-sm font-semibold text-slate-950">Caveats</h2>
-          {context?.caveats.length ? (
-            <ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-600">
-              {context.caveats.map((caveat) => <li key={caveat}>{caveat}</li>)}
-            </ul>
-          ) : (
-            <p className="mt-3 text-sm text-slate-500">No caveats captured.</p>
-          )}
-        </Card>
-        <Card>
-          <h2 className="text-sm font-semibold text-slate-950">Previous questions</h2>
-          {context?.previous_questions.length ? (
-            <ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-600">
-              {context.previous_questions.map((question) => <li key={question}>{question}</li>)}
-            </ul>
-          ) : (
-            <p className="mt-3 text-sm text-slate-500">No linked questions yet.</p>
-          )}
+          <h2 className="text-sm font-semibold text-slate-950">Danger zone</h2>
+          <p className="mt-2 text-sm text-slate-500">Permanently delete this dataset.</p>
+          <div className="mt-3">
+            <DeleteDataSourceAction dataSourceId={source.data_source_id} />
+          </div>
         </Card>
       </aside>
     </div>
@@ -157,4 +173,20 @@ function Metric({ label, value }: { label: string; value: number }) {
       <div className="mt-1 text-xl font-semibold text-slate-950">{value}</div>
     </div>
   );
+}
+
+function mayBeSingleColumnParse(profile: {
+  column_count: number;
+  columns: Array<{ name: string; sample_values: unknown[] }>;
+  sampled_rows: Record<string, unknown>[];
+}) {
+  if (profile.column_count !== 1) return false;
+  const columnName = profile.columns[0]?.name || "";
+  const columnSamples = profile.columns[0]?.sample_values?.map((value) => String(value ?? "")) || [];
+  const sampleValues = [
+    columnName,
+    ...columnSamples,
+    ...profile.sampled_rows.slice(0, 3).flatMap((row) => Object.values(row).map((value) => String(value ?? "")))
+  ];
+  return sampleValues.some((value) => /[,;\t|]/.test(value));
 }

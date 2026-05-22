@@ -237,6 +237,47 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         """,
     ),
+    (
+        12,
+        "investigation_messages",
+        """
+        CREATE TABLE IF NOT EXISTS investigation_messages (
+            id TEXT PRIMARY KEY,
+            investigation_id TEXT NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
+            run_id TEXT REFERENCES investigation_runs(id) ON DELETE SET NULL,
+            role TEXT NOT NULL,
+            type TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        """,
+    ),
+    (
+        13,
+        "final_report_txt_content",
+        """
+        -- Applied through _add_column_if_missing because SQLite cannot
+        -- run ALTER TABLE ADD COLUMN idempotently.
+        """,
+    ),
+    (
+        14,
+        "investigation_memory",
+        """
+        CREATE TABLE IF NOT EXISTS investigation_memory (
+            id TEXT PRIMARY KEY,
+            investigation_id TEXT NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
+            type TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        """,
+    ),
 ]
 
 
@@ -261,18 +302,42 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
     return int(value or 0)
 
 
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?)",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
 def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if not _table_exists(conn, table):
+        raise RuntimeError(f"Cannot add column to missing SQLite table: {table}")
+    quoted_table = _quote_identifier(table)
+    return {str(row[1]).lower() for row in conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()}
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    if column not in _column_names(conn, table):
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+    if column.lower() not in _column_names(conn, table):
+        conn.execute(f"ALTER TABLE {_quote_identifier(table)} ADD COLUMN {definition}")
 
 
 def _apply_migration(conn: sqlite3.Connection, version: int, sql: str) -> None:
-    if version not in {3, 4, 7, 8}:
+    if version not in {3, 4, 7, 8, 13}:
         conn.executescript(sql)
+        return
+
+    if version == 13:
+        _add_column_if_missing(
+            conn,
+            "final_report_snapshots",
+            "txt_content",
+            "txt_content TEXT NOT NULL DEFAULT ''",
+        )
         return
 
     if version == 3:

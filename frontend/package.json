@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:clean": "node scripts/clean-next-cache.mjs && next dev",
+    "clean:next": "node scripts/clean-next-cache.mjs",
     "build": "next build",
     "typecheck": "tsc --noEmit",
     "start": "next start",

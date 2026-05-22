@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -8,6 +9,8 @@ from typing import Any
 
 
 def to_jsonable(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, Enum):
@@ -19,7 +22,7 @@ def to_jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [to_jsonable(item) for item in value]
     try:
-        json.dumps(value)
+        json.dumps(value, allow_nan=False)
         return value
-    except TypeError:
+    except (TypeError, ValueError):
         return str(value)

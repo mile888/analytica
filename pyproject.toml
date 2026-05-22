@@ -1,7 +1,7 @@
 [project]
 name = "analytica"
 version = "0.1.0"
-description = "Add your description here"
+description = "AI analytical investigation workspace for dataset-agnostic analysis, charts, insights, and reports."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

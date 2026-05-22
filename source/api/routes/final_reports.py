@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from source.api.deps import get_store
 from source.api.serialization import to_jsonable
 from source.product.final_report_registry import list_published_reports
+from source.product.exporter import export_final_report_snapshot_txt
 from source.product.report_service import ReportEditingService
 
 
@@ -69,6 +70,15 @@ def download_final_markdown(snapshot_id: str):
     try:
         snapshot = get_store().get_final_report_snapshot(snapshot_id)
         return Response(content=snapshot.markdown_content, media_type="text/markdown")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{snapshot_id}/download/txt")
+def download_final_txt(snapshot_id: str):
+    try:
+        snapshot = get_store().get_final_report_snapshot(snapshot_id)
+        return Response(content=export_final_report_snapshot_txt(snapshot), media_type="text/plain")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

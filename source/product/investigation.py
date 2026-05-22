@@ -138,6 +138,35 @@ class InvestigationRunEventSeverity(StrEnum):
     ERROR = "error"
 
 
+class InvestigationMessageRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
+class InvestigationMessageType(StrEnum):
+    QUESTION = "question"
+    FOLLOW_UP = "follow_up"
+    ANSWER = "answer"
+    NOTE = "note"
+    RUN_SUMMARY = "run_summary"
+    ERROR = "error"
+
+
+class InvestigationMemoryType(StrEnum):
+    ASSUMPTION = "assumption"
+    OPEN_QUESTION = "open_question"
+    DECISION = "decision"
+    RISK = "risk"
+    MILESTONE = "milestone"
+
+
+class InvestigationMemoryStatus(StrEnum):
+    ACTIVE = "active"
+    RESOLVED = "resolved"
+    ARCHIVED = "archived"
+
+
 @dataclass
 class Artifact:
     artifact_type: ArtifactType = ArtifactType.UNKNOWN
@@ -252,6 +281,43 @@ class InvestigationRunEvent:
     @property
     def id(self) -> str:
         return self.event_id
+
+
+@dataclass
+class InvestigationMessage:
+    investigation_id: str
+    content: str
+    role: InvestigationMessageRole = InvestigationMessageRole.USER
+    message_type: InvestigationMessageType = InvestigationMessageType.FOLLOW_UP
+    run_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    message_id: str = field(default_factory=lambda: new_id("msg"))
+    created_at: datetime = field(default_factory=utc_now)
+
+    @property
+    def id(self) -> str:
+        return self.message_id
+
+    @property
+    def type(self) -> InvestigationMessageType:
+        return self.message_type
+
+
+@dataclass
+class InvestigationMemoryItem:
+    investigation_id: str
+    memory_type: InvestigationMemoryType
+    content: str
+    status: InvestigationMemoryStatus = InvestigationMemoryStatus.ACTIVE
+    title: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    memory_id: str = field(default_factory=lambda: new_id("mem"))
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+    @property
+    def id(self) -> str:
+        return self.memory_id
 
 
 @dataclass
@@ -389,6 +455,7 @@ class FinalReportSnapshot:
     readiness_snapshot: dict[str, Any]
     approval_status: ReportApprovalStatus
     source_report_json: dict[str, Any]
+    txt_content: str = ""
     created_by: str = "user"
     status: FinalReportStatus = FinalReportStatus.FINAL
     approved_at: datetime | None = None

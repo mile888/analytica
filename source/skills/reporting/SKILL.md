@@ -10,7 +10,7 @@ Use this skill after analysis tools have produced facts, previews, SQL results, 
 
 ## Workflow
 1. Read the user question and the tool outputs from this run.
-2. Summarize the answer in Russian with the smallest useful structure.
+2. Summarize the answer in the user's language with the smallest useful structure.
 3. Mention key numbers, categories, limitations, chart facts, or artifact paths when relevant.
 4. If the user requested a reusable report, call `write_report_artifact`.
 

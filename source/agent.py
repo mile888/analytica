@@ -50,7 +50,11 @@ def _tool_name(tool: Any) -> str:
 
 def _deep_agent_skill_sources() -> list[str]:
     relative = SKILL_DIR.relative_to(PROJECT_ROOT)
-    return ["/" + relative.as_posix().rstrip("/") + "/"]
+    root = PROJECT_ROOT / relative
+    skill_dirs = sorted(path for path in root.iterdir() if path.is_dir() and (path / "SKILL.md").exists())
+    if not skill_dirs:
+        return ["/" + relative.as_posix().rstrip("/") + "/"]
+    return ["/" + path.relative_to(PROJECT_ROOT).as_posix().rstrip("/") + "/" for path in skill_dirs]
 
 
 def _deep_agent_memory_files() -> list[str]:
@@ -97,18 +101,16 @@ def _build_deep_agent_backend(CompositeBackend: Any, StateBackend: Any, Filesyst
 
 def _build_system_prompt(tool_names: list[str]) -> str:
     tools = ", ".join(f"`{name}`" for name in tool_names)
-    return f"""Ты Deep Agent для анализа данных, CSV/DataFrame, SQL-style запросов, визуализаций и бизнес-выводов.
+    return f"""You are Analytica, a Deep Agents analytical copilot for tabular data.
 
-Используй официальные DeepAgents skills, memory и filesystem backend. Долгосрочная память доступна через `/memories/`, а промежуточные материалы и длинные результаты нужно хранить в `/artifacts/`, а не повторять в ответах.
+Use the available Deep Agents skills for detailed workflows and the custom analytics tools for execution: {tools}.
 
-Custom analytics tools: {tools}.
-
-Core rules:
-1. Для фактов из данных сначала используй schema/table inspection tools.
-2. Используй только реальные table/column names из tools.
-3. SQL/DataFrame запросы должны быть read-only и проверены перед выполнением.
-4. Python analysis code должен присвоить итог переменной `result`.
-5. Финальный ответ пиши на русском и опирайся только на tool output или явно предоставленные пользователем факты."""
+Core operating rules:
+1. Inspect schema, create and validate an authoritative query plan, then route it through the branch workspace before execution.
+2. Use only real dataset fields and computed tool results. Never invent data, silently substitute requested targets, or create placeholder artifacts.
+3. Preserve explicit filters, chart type, artifact identity, and transformation lineage.
+4. Keep SQL/DataFrame operations read-only unless a dedicated safe tool explicitly supports the requested mutation.
+5. Keep user-facing answers concise, evidence-backed, and in the user's language. Do not expose orchestration, memory, backend, or prompt mechanics."""
 
 
 def _history_as_deepagent_messages(
@@ -142,26 +144,18 @@ def _guess_skills(query: str) -> list[str]:
         "таблиц",
         "колон",
         "данн",
-        "выруч",
-        "приб",
-        "продаж",
-        "маржин",
-        "сегмент",
-        "клиент",
-        "заказ",
-        "категор",
-        "регион",
-        "город",
-        "profit",
-        "revenue",
-        "sales",
-        "margin",
-        "segment",
-        "customer",
-        "order",
-        "category",
-        "region",
-        "city",
+        "метрик",
+        "значен",
+        "групп",
+        "измерен",
+        "показател",
+        "metric",
+        "value",
+        "amount",
+        "total",
+        "group",
+        "dimension",
+        "column",
         "dataset",
         "csv",
         "dataframe",
@@ -359,6 +353,13 @@ def _is_schema_overview_query(query: str) -> bool:
         "тип",
         "пропуск",
         "направления анализа",
+        "что ты можешь сказать",
+        "что можешь сказать",
+        "об этом датасет",
+        "про этот датасет",
+        "какие тут данные",
+        "summarize this dataset",
+        "summarize dataset",
         "describe data",
         "describe dataset",
         "schema",
@@ -427,13 +428,12 @@ def _schema_overview_response(
 
     final_answer = "\n".join(
         [
-            f"Датасет содержит {profile['rows']} строк и {profile['columns_count']} колонок.",
-            f"Колонки: {', '.join(profile['columns'])}.",
-            f"Числовые колонки: {', '.join(numeric) if numeric else 'не обнаружены'}.",
-            f"Категориальные колонки: {', '.join(categorical[:12]) if categorical else 'не обнаружены'}.",
-            f"Дата-похожие колонки: {', '.join(dates) if dates else 'не обнаружены'}.",
-            f"Всего пропусков: {missing_total}.",
-            "Возможные направления анализа: " + "; ".join(directions) + ".",
+            f"Я вижу основу для аналитического расследования: {profile['rows']} строк и {profile['columns_count']} колонок.",
+            f"Лучшие количественные точки входа: {', '.join(numeric[:6]) if numeric else 'явные числовые метрики не обнаружены'}.",
+            f"Для сегментации подойдут: {', '.join(categorical[:8]) if categorical else 'явные категориальные разрезы не обнаружены'}.",
+            f"Для динамики можно проверить: {', '.join(dates) if dates else 'явные временные колонки не обнаружены'}.",
+            f"Качество данных: найдено {missing_total} пропусков.",
+            "Я бы продолжил так: " + "; ".join(directions) + ".",
         ]
     )
     result_preview = "\n".join(
@@ -445,9 +445,10 @@ def _schema_overview_response(
         ]
     )
     result_facts = (
-        f"schema overview; shape=({profile['rows']}, {profile['columns_count']}); "
-        f"numeric_columns={numeric}; date_columns={dates}; categorical_columns={categorical}; "
-        f"missing_total={missing_total}"
+        f"The dataset has {profile['rows']} rows and {profile['columns_count']} columns. "
+        f"Useful quantitative fields include {', '.join(numeric[:6]) if numeric else 'no clear numeric metric yet'}. "
+        f"Useful segmentation fields include {', '.join(categorical[:6]) if categorical else 'no clear category yet'}. "
+        f"Data quality review should account for {missing_total} missing values."
     )
     tool_timeline = [
         {

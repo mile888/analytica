@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import re
 import uuid
-import warnings
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
@@ -16,18 +15,12 @@ import streamlit as st
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from source.config import (
-    BAR_CHART_SUGGESTION_TEMPLATE,
-    DEFAULT_DATA_PATH,
-    SCHEMA_SUGGESTION_PROMPT,
-    SQL_TOP_N_SUGGESTION_TEMPLATE,
-    THREAD_PREFIX,
-    TOP_N_SUGGESTION_TEMPLATE,
-    ANALYTICA_THREAD_ID,
-)
+from source.config import DEFAULT_DATA_PATH, THREAD_PREFIX, ANALYTICA_THREAD_ID
 from source.dataframe import read_csv_dataset
 from source.agent import run_agent_stream, run_once
 from source.engine import create_engine
+from source.product.data_profiling import profile_dataframe
+from source.product.question_suggestions import build_data_aware_question_suggestions
 
 
 def inject_styles():
@@ -207,58 +200,14 @@ def render_artifact_downloads(artifacts: List[Dict[str, Any]]) -> None:
             else:
                 st.warning(f"{artifact_type}: файл не найден: {path}")
         else:
-            st.json(artifact)
+            with st.expander(f"Advanced artifact details: {title}", expanded=False):
+                st.json(artifact)
 
 
 def infer_demo_suggestions(df: pd.DataFrame) -> list[str]:
     if df is None or df.empty:
         return []
-
-    numeric_cols = [str(c) for c in df.select_dtypes(include="number").columns]
-    non_numeric_cols = [str(c) for c in df.columns if str(c) not in numeric_cols]
-    date_cols: list[str] = []
-    for col in non_numeric_cols:
-        sample = df[col].dropna().head(50)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            parsed = pd.to_datetime(sample, errors="coerce", dayfirst=True)
-        if len(parsed) and parsed.notna().mean() >= 0.7:
-            date_cols.append(str(col))
-
-    def score_dimension(col: str) -> tuple[int, int]:
-        lowered = col.lower()
-        bad_name = (
-            lowered == "id"
-            or lowered.endswith(" id")
-            or lowered.endswith("_id")
-            or "code" in lowered
-            or "name" in lowered
-        )
-        cardinality = int(df[col].nunique(dropna=True)) if col in df else 0
-        too_unique = cardinality > max(30, int(len(df) * 0.5))
-        return (1 if bad_name or too_unique else 0, cardinality)
-
-    def score_metric(col: str) -> tuple[int, int]:
-        lowered = col.lower()
-        bad_name = lowered == "id" or lowered.endswith(" id") or lowered.endswith("_id") or "code" in lowered or "postal" in lowered
-        preferred = any(marker in lowered for marker in ("sales", "revenue", "profit", "amount", "price", "metric", "value"))
-        return (0 if preferred else 1, 1 if bad_name else 0)
-
-    dimension_candidates = [c for c in non_numeric_cols if c not in date_cols]
-    metric_candidates = list(numeric_cols)
-    dimension = min(dimension_candidates, key=score_dimension) if dimension_candidates else ""
-    metric = min(metric_candidates, key=score_metric) if metric_candidates else ""
-    date_col = date_cols[0] if date_cols else ""
-
-    suggestions = [SCHEMA_SUGGESTION_PROMPT]
-    if dimension and metric:
-        suggestions.append(TOP_N_SUGGESTION_TEMPLATE.format(dimension=dimension, metric=metric))
-        suggestions.append(BAR_CHART_SUGGESTION_TEMPLATE.format(dimension=dimension, metric=metric))
-        suggestions.append(SQL_TOP_N_SUGGESTION_TEMPLATE.format(dimension=dimension, metric=metric))
-    if date_col and metric:
-        suggestions.append(f"Найди самые сильные падения `{metric}` по датам из `{date_col}`")
-    suggestions.append("Сделай краткий отчёт по найденным фактам")
-    return suggestions
+    return build_data_aware_question_suggestions(profile=profile_dataframe(df), limit=6)
 
 
 def render_assistant_turn(t: TurnMeta):
@@ -272,14 +221,14 @@ def render_assistant_turn(t: TurnMeta):
 
 def run_with_streaming_progress(df: pd.DataFrame, prompt: str, engine: str) -> Dict[str, Any]:
     stage_labels = {
-        "agent_start": "Запуск агента",
-        "skill_loading": "Skill loading",
-        "schema_inspection": "Schema inspection",
-        "sql_check": "SQL check",
-        "sql_query": "SQL query",
-        "code_execution": "Code execution",
-        "report_generation": "Report generation",
-        "fallback": "Fallback",
+        "agent_start": "Подготовка анализа",
+        "skill_loading": "Подготовка аналитических навыков",
+        "schema_inspection": "Проверка структуры данных",
+        "sql_check": "Проверка табличного запроса",
+        "sql_query": "Расчёт по таблице",
+        "code_execution": "Расчёт показателей",
+        "report_generation": "Формирование ответа",
+        "fallback": "Резервный аналитический расчёт",
         "done": "Готово",
     }
     progress_rows: list[dict[str, Any]] = []
@@ -397,7 +346,7 @@ init_session()
 
 st.markdown("<div class='title'>Analytica Demo</div>", unsafe_allow_html=True)
 st.markdown(
-    f"<div class='subtitle'>Загрузи CSV (или используй <code>{DEFAULT_DATA_PATH}</code>) → задай вопрос → агент построит план, код и ответ.</div>",
+    "<div class='subtitle'>Загрузи CSV или используй доступный датасет по умолчанию → задай вопрос → агент построит план, код и ответ.</div>",
     unsafe_allow_html=True,
 )
 
@@ -452,7 +401,7 @@ with top_left:
     if df is None:
         card(
             "Нет данных",
-            f"Положи файл <code>{DEFAULT_DATA_PATH}</code> или загрузи CSV в сайдбаре.",
+            "Загрузи CSV в сайдбаре или добавь любой CSV-файл в папку данных проекта.",
             icon="📁",
         )
     else:
@@ -471,7 +420,7 @@ with top_left:
 with top_right:
     st.subheader("Чат")
 
-    with st.expander("Подсказки для демо", expanded=(len(st.session_state.turns) == 0)):
+    with st.expander("Подсказки для анализа", expanded=(len(st.session_state.turns) == 0)):
         for suggestion in infer_demo_suggestions(df):
             st.markdown(f"- {suggestion}")
 

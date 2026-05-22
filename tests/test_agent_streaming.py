@@ -33,7 +33,7 @@ def test_run_agent_stream_falls_back_to_run_agent(monkeypatch):
 
     events = list(
         agent_module.run_agent_stream(
-            pd.DataFrame({"segment": ["A"], "metric": [1]}),
+            pd.DataFrame({"category_label": ["A"], "metric": [1]}),
             "Опиши данные",
             engine="pandas",
         )

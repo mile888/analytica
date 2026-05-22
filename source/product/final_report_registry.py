@@ -78,7 +78,7 @@ def get_published_report_summary(
         "readiness_is_ready": bool(readiness.get("is_ready", False)),
         "readiness_blocking_count": int(readiness.get("blocking_count") or 0),
         "readiness_warning_count": int(readiness.get("warning_count") or 0),
-        "download_available": bool(snapshot.markdown_content or snapshot.html_content),
+        "download_available": bool(snapshot.markdown_content or snapshot.html_content or snapshot.txt_content),
         "source_report_is_latest": report.is_latest if report else None,
         "tags": decision.tags,
         "owner": decision.owner,

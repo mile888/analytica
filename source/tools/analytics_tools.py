@@ -19,6 +19,24 @@ from source.dataframe import (
 from source.engine import create_engine
 from source.func import _bar_codegen, detect_engine, preview_result_and_facts, safe_exec
 from source.runtime_context import AnalyticaContext
+from source.product.branch_workspace import BranchWorkspace, BranchWorkspaceManager
+from source.product.execution_planner import (
+    AuthoritativeExecutionPlanner,
+    FilterConstraintValidator,
+    TemporalSanityValidator,
+)
+
+
+def _to_pandas_safe(value: Any, engine: str = "pandas") -> pd.DataFrame:
+    if isinstance(value, pd.DataFrame):
+        return value.copy()
+    try:
+        return create_engine(engine).to_pandas(value)
+    except Exception:
+        try:
+            return create_engine("pandas").to_pandas(value)
+        except Exception:
+            return pd.DataFrame()
 
 
 def _safe_agg(agg: str) -> str:
@@ -40,7 +58,12 @@ def _quote(value: str) -> str:
 def _inspect_schema(df: Any, engine: str = "auto") -> dict[str, Any]:
     engine_name = detect_engine(df, engine)
     engine_impl = create_engine(engine_name)
-    table = engine_impl.ensure_table(df)
+    try:
+        table = engine_impl.ensure_table(df)
+    except Exception:
+        engine_name = "pandas"
+        engine_impl = create_engine(engine_name)
+        table = engine_impl.to_pandas(df)
     return {
         "engine": engine_name,
         "df": table,
@@ -66,10 +89,7 @@ def _infer_schema_fields(df: Any, engine: str) -> dict[str, list[str]]:
         data = df if isinstance(df, pd.DataFrame) else _inspect_schema(df, engine)["df"]
         pdf = data if isinstance(data, pd.DataFrame) else pd.DataFrame()
         if not isinstance(data, pd.DataFrame):
-            try:
-                pdf = create_engine(engine).to_pandas(data)
-            except Exception:
-                pdf = pd.DataFrame()
+            pdf = _to_pandas_safe(data, engine)
     except Exception:
         pdf = pd.DataFrame()
 
@@ -181,6 +201,68 @@ def build_analytics_tools(fallback_run_context: dict[str, Any] | None = None) ->
     """Create DeepAgents analytics tools that read run data from ToolRuntime."""
 
     @tool
+    def create_authoritative_query_plan(question: str, runtime: ToolRuntime[AnalyticaContext]) -> dict[str, Any]:
+        """Parse the user query into the single authoritative analytical execution plan."""
+        run_context = _runtime_run_state(runtime, fallback_run_context)
+        pdf = run_context.get("df")
+        if not isinstance(pdf, pd.DataFrame):
+            pdf = _to_pandas_safe(pdf, run_context.get("engine", "pandas"))
+        plan = AuthoritativeExecutionPlanner.plan(question, pdf, active_branch=run_context.get("branch_workspace"))
+        run_context["last_query_plan"] = plan.to_payload()
+        _record_tool_event(run_context, "create_authoritative_query_plan", "ok", intent=plan.intent, metric=plan.metric, dimension=plan.dimension)
+        return plan.to_payload()
+
+    @tool
+    def validate_query_plan(runtime: ToolRuntime[AnalyticaContext]) -> dict[str, Any]:
+        """Validate the current authoritative query plan for filters and forbidden substitutions."""
+        run_context = _runtime_run_state(runtime, fallback_run_context)
+        raw_plan = run_context.get("last_query_plan")
+        if not isinstance(raw_plan, dict):
+            return {"valid": False, "errors": ["no query plan available"]}
+        pdf = run_context.get("df")
+        if not isinstance(pdf, pd.DataFrame):
+            pdf = _to_pandas_safe(pdf, run_context.get("engine", "pandas"))
+        plan = AuthoritativeExecutionPlanner.plan(str(raw_plan.get("raw_question") or run_context.get("query") or ""), pdf)
+        errors = FilterConstraintValidator.validate(plan, pdf)
+        if plan.forbidden_substitutions:
+            errors.extend([f"forbidden substitution target: {item}" for item in plan.forbidden_substitutions])
+        _record_tool_event(run_context, "validate_query_plan", "error" if errors else "ok", errors=len(errors))
+        return {"valid": not errors, "errors": errors, "plan": plan.to_payload()}
+
+    @tool
+    def route_branch_workspace(runtime: ToolRuntime[AnalyticaContext]) -> dict[str, Any]:
+        """Route the current query plan into the analytical branch workspace."""
+        run_context = _runtime_run_state(runtime, fallback_run_context)
+        raw_plan = run_context.get("last_query_plan")
+        if not isinstance(raw_plan, dict):
+            return {"error": "no query plan available"}
+        pdf = run_context.get("df")
+        if not isinstance(pdf, pd.DataFrame):
+            pdf = _to_pandas_safe(pdf, run_context.get("engine", "pandas"))
+        plan = AuthoritativeExecutionPlanner.plan(str(raw_plan.get("raw_question") or run_context.get("query") or ""), pdf)
+        workspace = BranchWorkspaceManager.from_payload(run_context.get("branch_workspace"))
+        decision = BranchWorkspaceManager.route(plan, workspace)
+        workspace.active_branch_id = decision.branch_id
+        run_context["branch_workspace"] = workspace.to_payload()
+        _record_tool_event(run_context, "route_branch_workspace", "ok", action=decision.action.value)
+        return decision.to_payload()
+
+    @tool
+    def validate_delivery_delay_sanity(
+        order_date_col: str,
+        ship_date_col: str,
+        runtime: ToolRuntime[AnalyticaContext],
+    ) -> dict[str, Any]:
+        """Validate delivery delay date calculations before shipping-delay analysis."""
+        run_context = _runtime_run_state(runtime, fallback_run_context)
+        pdf = run_context.get("df")
+        if not isinstance(pdf, pd.DataFrame):
+            pdf = _to_pandas_safe(pdf, run_context.get("engine", "pandas"))
+        issues = TemporalSanityValidator.delivery_delay_issues(pdf, order_date_col, ship_date_col)
+        _record_tool_event(run_context, "validate_delivery_delay_sanity", "error" if issues else "ok", issues=len(issues))
+        return {"valid": not issues, "issues": issues}
+
+    @tool
     def inspect_dataset_schema(runtime: ToolRuntime[AnalyticaContext]) -> dict[str, str]:
         """Inspect the dataset schema and resolve the compute engine."""
         run_context = _runtime_run_state(runtime, fallback_run_context)
@@ -193,7 +275,7 @@ def build_analytics_tools(fallback_run_context: dict[str, Any] | None = None) ->
         try:
             pdf = run_context["df"] if isinstance(run_context["df"], pd.DataFrame) else pd.DataFrame()
             if not isinstance(run_context["df"], pd.DataFrame):
-                pdf = create_engine(run_context["engine"]).to_pandas(run_context["df"])
+                pdf = _to_pandas_safe(run_context["df"], run_context["engine"])
             run_context["data_profile"] = dataframe_profile(pdf)
         except Exception as exc:
             run_context["data_profile"] = {"profile_error": str(exc)}
@@ -376,9 +458,7 @@ result = (
             inspect_dataset_schema.func(runtime)
         pdf = run_context["df"] if isinstance(run_context["df"], pd.DataFrame) else None
         if pdf is None:
-            from source.engine import create_engine
-
-            pdf = create_engine(run_context["engine"]).to_pandas(run_context["df"])
+            pdf = _to_pandas_safe(run_context["df"], run_context["engine"])
         tables = list_sql_tables(pdf)
         _record_tool_event(run_context, "list_dataframe_tables", "ok", tables=", ".join(tables))
         return {"tables": ", ".join(tables)}
@@ -394,9 +474,7 @@ result = (
             inspect_dataset_schema.func(runtime)
         pdf = run_context["df"] if isinstance(run_context["df"], pd.DataFrame) else None
         if pdf is None:
-            from source.engine import create_engine
-
-            pdf = create_engine(run_context["engine"]).to_pandas(run_context["df"])
+            pdf = _to_pandas_safe(run_context["df"], run_context["engine"])
         schema = sql_table_schema(pdf, table_name or None)
         run_context["sql_schema"] = schema
         _record_tool_event(run_context, "describe_dataframe_table", "ok", table_name=table_name or None)
@@ -435,9 +513,7 @@ result = (
             inspect_dataset_schema.func(runtime)
         pdf = run_context["df"] if isinstance(run_context["df"], pd.DataFrame) else None
         if pdf is None:
-            from source.engine import create_engine
-
-            pdf = create_engine(run_context["engine"]).to_pandas(run_context["df"])
+            pdf = _to_pandas_safe(run_context["df"], run_context["engine"])
         try:
             checked = validate_read_only_sql(query)
             if run_context.get("last_checked_sql") != checked:
@@ -579,6 +655,10 @@ result = (
         }
 
     return [
+        create_authoritative_query_plan,
+        validate_query_plan,
+        route_branch_workspace,
+        validate_delivery_delay_sanity,
         inspect_dataset_schema,
         list_dataframe_tables,
         describe_dataframe_table,

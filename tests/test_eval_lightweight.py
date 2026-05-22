@@ -38,11 +38,11 @@ class _FakeAgent:
 def test_agent_output_contains_structured_report(monkeypatch):
     run_context = {
         "query": "Опиши данные",
-        "df": pd.DataFrame({"segment": ["A"], "metric": [1]}),
+        "df": pd.DataFrame({"category_label": ["A"], "metric": [1]}),
         "engine": "pandas",
         "code": "result = df.head()",
         "exec_error": None,
-        "result_preview": "segment metric",
+        "result_preview": "category_label metric",
         "result_facts": "dataframe shape=(1, 2)",
         "result_base64": "",
         "loaded_skills": ["data-analysis"],
@@ -63,8 +63,8 @@ def test_agent_output_contains_structured_report(monkeypatch):
 def test_schema_overview_query_uses_deterministic_dataframe_profile():
     df = pd.DataFrame(
         {
-            "Category": ["A", "B"],
-            "Sales": [10.0, 20.0],
+            "category_label": ["A", "B"],
+            "metric_value": [10.0, 20.0],
         }
     )
 
@@ -74,12 +74,12 @@ def test_schema_overview_query_uses_deterministic_dataframe_profile():
     assert output["critic_verdict"] == ""
     assert output["tool_timeline"][0]["tool"] == "inspect_dataset_schema"
     assert "2 строк" in output["final_answer"]
-    assert "Category" in output["result_preview"]
-    assert "Sales" in output["structured_report"]["key_findings"][0]
+    assert "category_label" in output["result_preview"]
+    assert "metric_value" in output["structured_report"]["key_findings"][0]
 
 
-def test_business_metric_question_routes_to_data_analysis():
-    skills = agent_module._guess_skills("Почему прибыль отличается по сегментам клиентов?")
+def test_metric_question_routes_to_data_analysis():
+    skills = agent_module._guess_skills("Почему значение метрики отличается по группам?")
 
     assert "data-analysis" in skills
     assert "csv-dataframe-analysis" in skills
@@ -89,13 +89,13 @@ def test_business_metric_question_routes_to_data_analysis():
 def test_sql_eval_trajectory_uses_check_before_query():
     context = {
         "query": "sql eval",
-        "df": pd.DataFrame({"segment": ["A", "B"], "metric": [1, 2]}),
+        "df": pd.DataFrame({"category_label": ["A", "B"], "metric": [1, 2]}),
         "engine": "pandas",
         "schema": "",
         "loaded_skills": [],
     }
     tools = _tool_map(context)
-    query = "SELECT segment, SUM(metric) AS total FROM data GROUP BY segment"
+    query = "SELECT category_label, SUM(metric) AS total FROM data GROUP BY category_label"
     runtime = _runtime(context)
 
     _invoke(tools["check_dataframe_sql"], runtime, query=query)
@@ -147,7 +147,13 @@ def test_build_deep_agent_uses_official_deepagents_skills(monkeypatch):
     tool_names = [tool.name for tool in captured["tools"]]
     assert isinstance(agent, FakeCompiledAgent)
     assert captured["model"] == "fake-model"
-    assert captured["skills"] == ["/source/skills/"]
+    assert set(captured["skills"]) >= {
+        "/source/skills/data-analysis/",
+        "/source/skills/csv-dataframe-analysis/",
+        "/source/skills/visualization/",
+        "/source/skills/business-analysis/",
+        "/source/skills/reporting/",
+    }
     assert captured["memory"] == ["/memories/AGENTS.md"]
     assert captured["context_schema"] is AnalyticaContext
     assert isinstance(captured["backend"], FakeCompositeBackend)
@@ -157,6 +163,9 @@ def test_build_deep_agent_uses_official_deepagents_skills(monkeypatch):
     assert captured["backend"].routes["/memories/"].kwargs["virtual_mode"] is True
     assert captured["backend"].routes["/source/skills/"].kwargs["virtual_mode"] is True
     assert "run_python_analysis" in tool_names
+    assert "create_authoritative_query_plan" in tool_names
+    assert "validate_query_plan" in tool_names
+    assert "route_branch_workspace" in tool_names
     assert "load_skill" not in tool_names
     assert "list_available_skills" not in tool_names
 
@@ -192,11 +201,11 @@ def test_run_agent_passes_typed_runtime_context_to_invoke(monkeypatch):
     captured = {}
     run_context = {
         "query": "Посчитай metric",
-        "df": pd.DataFrame({"segment": ["A"], "metric": [1]}),
+        "df": pd.DataFrame({"category_label": ["A"], "metric": [1]}),
         "engine": "pandas",
         "code": "result = df.head()",
         "exec_error": None,
-        "result_preview": "segment metric",
+        "result_preview": "category_label metric",
         "result_facts": "dataframe shape=(1, 2)",
         "result_base64": "",
         "loaded_skills": ["data-analysis"],
@@ -233,7 +242,7 @@ def test_run_agent_passes_typed_runtime_context_to_invoke(monkeypatch):
 def test_analytics_tools_accept_typed_tool_runtime():
     context = {
         "query": "typed tool runtime",
-        "df": pd.DataFrame({"segment": ["A"], "metric": [1]}),
+        "df": pd.DataFrame({"category_label": ["A"], "metric": [1]}),
         "engine": "pandas",
         "schema": "",
         "loaded_skills": [],
@@ -288,7 +297,7 @@ def test_bar_chart_invalid_metric_returns_message_not_empty_plot():
             {
                 "Row ID": [1, 2, 3],
                 "Order ID": ["A-1", "A-2", "A-3"],
-                "Sales": [10.0, 20.0, 30.0],
+                "Metric Value": [10.0, 20.0, 30.0],
             }
         ),
         "engine": "pandas",

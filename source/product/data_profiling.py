@@ -5,15 +5,31 @@ from typing import Any
 
 import pandas as pd
 
+from source.dataframe import read_csv_dataset
 from source.product.data_sources import DataSourceColumn, DataSourceProfile
 from source.product.investigation import utc_now
 
 
 def profile_csv(path: str | Path) -> DataSourceProfile:
     try:
-        return profile_dataframe(pd.read_csv(path))
+        return profile_dataframe(_read_csv_for_profile(path))
     except pd.errors.EmptyDataError:
         return profile_dataframe(pd.DataFrame())
+
+
+def _read_csv_for_profile(path: str | Path) -> pd.DataFrame:
+    csv_path = Path(path)
+    if csv_path.exists():
+        try:
+            return read_csv_dataset(csv_path)
+        except pd.errors.ParserError:
+            retry_kwargs = {"escapechar": chr(92)}
+            try:
+                return read_csv_dataset(csv_path, **retry_kwargs)
+            except pd.errors.ParserError:
+                retry_kwargs["on_bad_lines"] = "skip"
+                return read_csv_dataset(csv_path, **retry_kwargs)
+    return read_csv_dataset(path)
 
 
 def profile_dataframe(df: pd.DataFrame) -> DataSourceProfile:

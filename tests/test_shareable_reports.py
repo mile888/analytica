@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from source.product.exporter import export_shareable_report_html, export_shareable_report_markdown
+from source.product.exporter import (
+    export_final_report_snapshot_txt,
+    export_shareable_report_html,
+    export_shareable_report_markdown,
+    export_shareable_report_txt,
+)
 from source.product.final_report_registry import get_published_report_summary, list_published_reports
 from source.product.investigation import (
     Artifact,
@@ -45,42 +50,123 @@ def test_build_report_from_empty_investigation_does_not_crash() -> None:
 def test_executive_report_uses_accepted_findings_before_proposed_and_excludes_rejected() -> None:
     investigation = Investigation(title="Findings", user_question="Question")
     investigation.findings = [
-        Finding(title="Proposed", text="Proposed text", status=FindingStatus.PROPOSED),
-        Finding(title="Rejected", text="Rejected text", status=FindingStatus.REJECTED),
-        Finding(title="Accepted", text="Accepted text", status=FindingStatus.ACCEPTED),
+        Finding(title="Proposed", text="Metric distribution has a high mean.", status=FindingStatus.PROPOSED, metadata={"confidence": "High"}),
+        Finding(title="Rejected", text="Rejected text has a high mean.", status=FindingStatus.REJECTED, metadata={"confidence": "High"}),
+        Finding(title="Accepted", text="Accepted metric distribution has a high mean.", status=FindingStatus.ACCEPTED, metadata={"confidence": "High"}),
     ]
 
     report = build_shareable_report(investigation)
     findings_section = next(section for section in report.sections if section.title == "Key findings")
 
-    assert "Accepted text" in findings_section.content
-    assert "Proposed text" not in findings_section.content
+    assert "Accepted metric distribution has a high mean." in findings_section.content
+    assert "Metric distribution has a high mean." not in findings_section.content
     assert "Rejected text" not in findings_section.content
     assert report.source_finding_ids == [investigation.findings[2].finding_id]
 
 
 def test_executive_report_uses_proposed_when_no_accepted_findings() -> None:
     investigation = Investigation(title="Findings", user_question="Question")
-    investigation.findings = [Finding(title="Proposed", text="Proposed text", status=FindingStatus.PROPOSED)]
+    investigation.findings = [Finding(title="Proposed", text="Proposed metric distribution has a high mean.", status=FindingStatus.PROPOSED, metadata={"confidence": "High"})]
 
     report = build_shareable_report(investigation)
     findings_section = next(section for section in report.sections if section.title == "Key findings")
 
-    assert "Proposed text" in findings_section.content
+    assert "Proposed metric distribution has a high mean." in findings_section.content
 
 
-def test_pinned_artifacts_appear_before_unpinned_in_report() -> None:
+def test_report_excludes_medium_and_error_findings() -> None:
+    investigation = Investigation(title="Findings", user_question="Question")
+    investigation.findings = [
+        Finding(title="Medium", text="Metric distribution has a high mean.", status=FindingStatus.PROPOSED, metadata={"confidence": "Medium"}),
+        Finding(title="Error", text="I cannot explain this chart because the exact artifact is missing.", status=FindingStatus.PROPOSED, metadata={"confidence": "High"}),
+        Finding(title="High", text="Salary distribution has a high mean.", status=FindingStatus.PROPOSED, metadata={"confidence": "High"}),
+    ]
+
+    report = build_shareable_report(investigation)
+    findings_section = next(section for section in report.sections if section.title == "Key findings")
+
+    assert "Salary distribution has a high mean." in findings_section.content
+    assert "Metric distribution has a high mean." not in findings_section.content
+    assert "exact artifact" not in findings_section.content
+
+
+def test_report_prefers_artifacts_selected_for_report() -> None:
+    investigation = Investigation(title="Selected charts", user_question="Question")
+    first = Artifact(
+        artifact_type=ArtifactType.CHART,
+        title="Unselected chart",
+        content={"chart_type": "bar", "rows": [{"label": "A", "value": 1}]},
+    )
+    selected = Artifact(
+        artifact_type=ArtifactType.CHART,
+        title="Selected chart",
+        content={"chart_type": "bar", "rows": [{"label": "B", "value": 2}]},
+        metadata={"selected_for_report": True},
+    )
+    table = Artifact(
+        artifact_type=ArtifactType.TABLE,
+        title="Selected table",
+        content=[{"Metric": "B", "Value": 2}],
+        metadata={"selected_for_report": True},
+    )
+    investigation.artifacts = [first, selected, table]
+
+    report = build_shareable_report(investigation)
+
+    assert report.source_artifact_ids == [selected.artifact_id, table.artifact_id]
+    evidence = next(section for section in report.sections if section.title == "Evidence")
+    assert "Selected chart" in evidence.content
+    assert "Selected table" in evidence.content
+    assert "Unselected chart" not in evidence.content
+
+
+def test_report_builder_prefers_structured_insight_fields() -> None:
+    investigation = Investigation(title="Insight report", user_question="Question")
+    investigation.findings = [
+        Finding(
+            title="Salary variance",
+            text="Raw fallback text",
+            status=FindingStatus.PROPOSED,
+            metadata={
+                "conclusion": "Salary_LPA varies strongly across Job_Title.",
+                "confidence": "High",
+                "evidence_reason": "Supported by grouped table and bar chart.",
+                "limitation": "Small groups may distort ranking.",
+                "recommended_validation": "Inspect low-sample high-variance groups.",
+                "business_implication": "Compensation bands may be inconsistent across roles.",
+            },
+        )
+    ]
+
+    report = build_shareable_report(investigation)
+    findings_section = next(section for section in report.sections if section.title == "Key findings")
+    limitations_section = next(section for section in report.sections if section.title == "Limitations")
+    next_steps_section = next(section for section in report.sections if section.title == "Next steps")
+    markdown = export_shareable_report_markdown(report)
+
+    assert "- Salary_LPA varies strongly across Job_Title." in findings_section.content
+    assert "Confidence: High" not in findings_section.content
+    assert "Evidence: Supported by grouped table and bar chart." in findings_section.content
+    assert "Implication: Compensation bands may be inconsistent across roles." in findings_section.content
+    assert "Small groups may distort ranking." in limitations_section.content
+    assert "Inspect low-sample high-variance groups." in next_steps_section.content
+    assert "metadata" not in markdown.lower()
+
+
+def test_report_artifacts_are_limited_to_user_charts_and_tables() -> None:
     investigation = Investigation(title="Artifacts", user_question="Question")
     investigation.artifacts = [
         Artifact(artifact_type=ArtifactType.TEXT, title="Unpinned", content="B", pinned=False),
-        Artifact(artifact_type=ArtifactType.TEXT, title="Pinned", content="A", pinned=True),
+        Artifact(artifact_type=ArtifactType.TEXT, title="Pinned text", content="A", pinned=True),
+        Artifact(artifact_type=ArtifactType.TABLE, title="Pinned table", content={"rows": []}, pinned=True),
+        Artifact(artifact_type=ArtifactType.CHART, title="Chart", content={"chart_type": "bar"}, pinned=False),
     ]
 
     report = build_shareable_report(investigation)
 
     assert report.source_artifact_ids == [
-        investigation.artifacts[1].artifact_id,
-        investigation.artifacts[0].artifact_id,
+        investigation.artifacts[2].artifact_id,
+        investigation.artifacts[3].artifact_id,
     ]
 
 
@@ -102,7 +188,7 @@ def test_hidden_artifacts_are_never_included() -> None:
     assert "Hidden" not in export_shareable_report_markdown(report)
 
 
-def test_technical_artifacts_excluded_by_default_and_included_when_requested() -> None:
+def test_technical_code_artifacts_excluded_from_submission_report() -> None:
     investigation = Investigation(title="Artifacts", user_question="Question")
     technical = Artifact(
         artifact_type=ArtifactType.PYTHON_CODE,
@@ -116,7 +202,7 @@ def test_technical_artifacts_excluded_by_default_and_included_when_requested() -
     with_technical = build_shareable_report(investigation, include_technical=True)
 
     assert clean.source_artifact_ids == []
-    assert with_technical.source_artifact_ids == [technical.artifact_id]
+    assert with_technical.source_artifact_ids == []
 
 
 def test_shareable_report_persists_in_sqlite_and_migration_v5_is_applied(tmp_path: Path) -> None:
@@ -128,7 +214,7 @@ def test_shareable_report_persists_in_sqlite_and_migration_v5_is_applied(tmp_pat
     reloaded_store = SQLiteInvestigationStore(tmp_path / "investigations.sqlite")
     loaded = reloaded_store.get_shareable_report(saved.report_id)
 
-    assert reloaded_store.get_schema_version() == 11
+    assert reloaded_store.get_schema_version() == 14
     assert loaded.title == report.title
     assert loaded.sections[0].title == report.sections[0].title
     assert reloaded_store.list_shareable_reports(investigation.investigation_id)[0].report_id == saved.report_id
@@ -220,11 +306,15 @@ def test_export_shareable_report_to_markdown_and_html_works() -> None:
 
     markdown = export_shareable_report_markdown(report)
     html = export_shareable_report_html(report)
+    txt = export_shareable_report_txt(report)
 
     assert "# Final report" in markdown
+    assert "| Approval | `draft` |" in markdown
     assert "## Answer" in markdown
     assert "<h1>Final report</h1>" in html
     assert "Use Standard Class" in html
+    assert "FINAL REPORT" in txt
+    assert "ANSWER" in txt
 
 
 def test_export_shareable_report_html_escapes_unsafe_content() -> None:
@@ -327,7 +417,29 @@ def test_shareable_report_export_comments_are_optional() -> None:
 
     assert "Private review note" not in clean
     assert "Private review note" in with_comments
-    assert "**Approval:** `draft`" in clean
+    assert "| Approval | `draft` |" in clean
+
+
+def test_txt_export_works_for_empty_report_and_contains_no_raw_json() -> None:
+    report = ShareableReport(investigation_id="inv_1", title="Empty report")
+
+    txt = export_shareable_report_txt(report)
+
+    assert "EMPTY REPORT" in txt
+    assert "No sections yet." in txt
+    assert "{" not in txt
+    assert "}" not in txt
+
+
+def test_final_snapshot_txt_export_uses_stored_content() -> None:
+    store = InvestigationStore()
+    investigation = store.create_investigation("Question")
+    report = store.create_shareable_report(build_shareable_report(investigation))
+    ReportEditingService(store).approve_report(report.report_id, force=True)
+    snapshot = ReportEditingService(store).create_final_report_snapshot(report.report_id, force=True)
+
+    assert snapshot.txt_content
+    assert export_final_report_snapshot_txt(snapshot) == snapshot.txt_content
 
 
 def test_empty_report_fails_readiness() -> None:
@@ -550,9 +662,10 @@ def test_final_snapshot_persists_in_sqlite(tmp_path: Path) -> None:
     reloaded = SQLiteInvestigationStore(db_path)
     loaded = reloaded.get_final_report_snapshot(snapshot.snapshot_id)
 
-    assert reloaded.get_schema_version() == 11
+    assert reloaded.get_schema_version() == 14
     assert loaded.snapshot_id == snapshot.snapshot_id
     assert loaded.markdown_content == snapshot.markdown_content
+    assert loaded.txt_content == snapshot.txt_content
     assert loaded.decision_metadata.decision_status == DecisionStatus.UNKNOWN
 
 
@@ -594,7 +707,7 @@ def test_registry_filters_by_status_and_investigation_id() -> None:
 
 def test_registry_search_matches_title_and_investigation_title() -> None:
     store = InvestigationStore()
-    investigation = store.create_investigation("Question", title="Revenue drop analysis")
+    investigation = store.create_investigation("Question", title="Metric drop analysis")
     report = build_shareable_report(investigation)
     report.title = "Executive memo"
     saved = store.create_shareable_report(report)
@@ -603,7 +716,7 @@ def test_registry_search_matches_title_and_investigation_title() -> None:
     snapshot = service.create_final_report_snapshot(saved.report_id)
 
     by_title = list_published_reports(store, search="executive")
-    by_investigation = list_published_reports(store, search="revenue drop")
+    by_investigation = list_published_reports(store, search="metric drop")
 
     assert by_title[0]["snapshot_id"] == snapshot.snapshot_id
     assert by_investigation[0]["snapshot_id"] == snapshot.snapshot_id
@@ -635,26 +748,28 @@ def test_update_decision_metadata_persists_without_changing_content(tmp_path: Pa
     snapshot = service.create_final_report_snapshot(report.report_id)
     original_markdown = snapshot.markdown_content
     original_html = snapshot.html_content
+    original_txt = snapshot.txt_content
 
     service.update_final_report_metadata(
         snapshot.snapshot_id,
         DecisionMetadata(
-            tags=["Revenue", " Growth "],
+            tags=["Metric", " Growth "],
             owner="Ira",
             audience="Leadership",
-            business_area="Sales",
+            business_area="Metric Value",
             decision_date="2026-05-11",
             decision_status=DecisionStatus.ACCEPTED,
-            short_description="Decision on revenue growth.",
+            short_description="Decision on metric growth.",
         ),
     )
     loaded = SQLiteInvestigationStore(db_path).get_final_report_snapshot(snapshot.snapshot_id)
 
-    assert loaded.decision_metadata.tags == ["revenue", "growth"]
+    assert loaded.decision_metadata.tags == ["metric", "growth"]
     assert loaded.decision_metadata.owner == "Ira"
     assert loaded.decision_metadata.decision_status == DecisionStatus.ACCEPTED
     assert loaded.markdown_content == original_markdown
     assert loaded.html_content == original_html
+    assert loaded.txt_content == original_txt
 
 
 def test_add_and_remove_final_report_tags() -> None:
@@ -665,17 +780,17 @@ def test_add_and_remove_final_report_tags() -> None:
     service.approve_report(report.report_id)
     snapshot = service.create_final_report_snapshot(report.report_id)
 
-    tagged = service.add_final_report_tags(snapshot.snapshot_id, [" Sales ", "sales", "Retention"])
-    assert tagged.decision_metadata.tags == ["sales", "retention"]
+    tagged = service.add_final_report_tags(snapshot.snapshot_id, [" Metric ", "metric", "Retention"])
+    assert tagged.decision_metadata.tags == ["metric", "retention"]
 
-    removed = service.remove_final_report_tag(snapshot.snapshot_id, "SALES")
+    removed = service.remove_final_report_tag(snapshot.snapshot_id, "METRIC")
 
     assert removed.decision_metadata.tags == ["retention"]
 
 
 def test_registry_search_and_filters_use_decision_metadata() -> None:
     store = InvestigationStore()
-    investigation = store.create_investigation("Question", title="Customer retention study")
+    investigation = store.create_investigation("Question", title="Entity retention study")
     report = store.create_shareable_report(build_shareable_report(investigation))
     service = ReportEditingService(store)
     service.approve_report(report.report_id)
@@ -683,7 +798,7 @@ def test_registry_search_and_filters_use_decision_metadata() -> None:
     service.update_final_report_metadata(
         snapshot.snapshot_id,
         {
-            "tags": ["retention", "customer success"],
+            "tags": ["retention", "entity success"],
             "owner": "Masha",
             "audience": "Exec team",
             "business_area": "Growth",
@@ -695,7 +810,7 @@ def test_registry_search_and_filters_use_decision_metadata() -> None:
     by_tag_search = list_published_reports(store, search="retention")
     by_area_search = list_published_reports(store, search="growth")
     by_status = list_published_reports(store, decision_status="accepted")
-    by_tag = list_published_reports(store, tag="Customer Success")
+    by_tag = list_published_reports(store, tag="Entity Success")
 
     assert by_tag_search[0]["snapshot_id"] == snapshot.snapshot_id
     assert by_area_search[0]["snapshot_id"] == snapshot.snapshot_id

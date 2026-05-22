@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Annotated
 
 import pandas as pd
@@ -8,7 +9,9 @@ from pydantic import BaseModel, Field
 
 from source.api.deps import get_store
 from source.api.serialization import to_jsonable
+from source.dataframe import read_csv_dataset
 from source.product.data_context import build_data_source_usage_context
+from source.product.execution_context import mark_profile_only_runtime, persist_dataset_runtime
 from source.product.data_profiling import profile_csv
 from source.product.data_sources import (
     ColumnSemanticNote,
@@ -19,6 +22,7 @@ from source.product.data_sources import (
     DataSourceType,
 )
 from source.product.file_storage import save_uploaded_csv
+from source.product.question_suggestions import build_data_aware_question_suggestions
 
 
 router = APIRouter(prefix="/data-sources", tags=["data-sources"])
@@ -73,7 +77,11 @@ def create_data_source(payload: DataSourceCreate):
         tags=payload.tags,
         metadata=payload.metadata,
     )
-    return to_jsonable(get_store().create_data_source(source))
+    store = get_store()
+    created = store.create_data_source(source)
+    if not created.location:
+        mark_profile_only_runtime(store, created.data_source_id)
+    return to_jsonable(store.get_data_source(created.data_source_id))
 
 
 @router.post("/upload-csv")
@@ -107,6 +115,11 @@ async def upload_csv_data_source(
         store.update_data_source(created)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Could not parse CSV: {exc}") from exc
     store.save_data_source_profile(created.data_source_id, profile)
+    df = _read_uploaded_runtime_csv(location)
+    if df.empty and len(df.columns) == 0:
+        mark_profile_only_runtime(store, created.data_source_id, reason="empty_dataframe")
+    else:
+        persist_dataset_runtime(store, created.data_source_id, df)
     return {
         "data_source": to_jsonable(store.get_data_source(created.data_source_id)),
         "profile": to_jsonable(profile),
@@ -133,6 +146,29 @@ def get_data_source_profile(data_source_id: str):
 def get_data_source_usage_context(data_source_id: str):
     try:
         return to_jsonable(build_data_source_usage_context(get_store(), data_source_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{data_source_id}/suggested-questions")
+def get_data_source_suggested_questions(data_source_id: str, limit: int = 8):
+    store = get_store()
+    try:
+        profile = None
+        notes = None
+        with suppress(KeyError):
+            profile = store.get_data_source_profile(data_source_id)
+        with suppress(KeyError):
+            notes = store.get_data_source_semantic_notes(data_source_id)
+        context = build_data_source_usage_context(store, data_source_id)
+        return {
+            "suggestions": build_data_aware_question_suggestions(
+                profile=profile,
+                usage_context=context,
+                semantic_notes=notes,
+                limit=max(1, min(limit, 20)),
+            )
+        }
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -206,10 +242,11 @@ def update_data_source(data_source_id: str, payload: DataSourceUpdate):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/{data_source_id}/archive")
-def archive_data_source(data_source_id: str):
+@router.delete("/{data_source_id}")
+def delete_data_source(data_source_id: str, delete_file: bool = True):
     try:
-        return to_jsonable(get_store().archive_data_source(data_source_id))
+        file_deleted = get_store().delete_data_source(data_source_id, delete_file=delete_file)
+        return {"deleted": True, "id": data_source_id, "file_deleted": file_deleted}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -231,3 +268,15 @@ def _parse_form_tags(tags: list[str] | None) -> list[str]:
     for item in tags or []:
         values.extend(part.strip() for part in str(item).split(","))
     return [value for value in values if value]
+
+
+def _read_uploaded_runtime_csv(location: str) -> pd.DataFrame:
+    try:
+        return read_csv_dataset(location)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+    except pd.errors.ParserError:
+        try:
+            return read_csv_dataset(location, escapechar=chr(92))
+        except pd.errors.ParserError:
+            return read_csv_dataset(location, escapechar=chr(92), on_bad_lines="skip")

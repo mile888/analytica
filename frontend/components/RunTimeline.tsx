@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EventStreamResponse, RunEvent, getRunEvents } from "@/lib/api";
-import { StatusBadge, formatDate, stageLabel } from "@/components/ui";
+import { EmptyState, StatusBadge, formatDate, stageLabel } from "@/components/ui";
 
 export function mergeRunEvents(current: RunEvent[], incoming: RunEvent[]) {
   const seen = new Set(current.map((event) => event.event_id));
@@ -51,21 +51,39 @@ export function RunTimeline({ runId, status }: { runId: string; status?: string 
     [events]
   );
 
-  if (error) return <p className="text-sm text-red-600">{error}</p>;
-  if (ordered.length === 0) return <p className="text-sm text-slate-500">No timeline events yet.</p>;
+  if (error) return <p className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/70 dark:bg-red-950/40 dark:text-red-300">{error}</p>;
+  if (ordered.length === 0) return <EmptyState>No timeline events yet.</EmptyState>;
 
   return (
-    <div className="space-y-3">
+    <div className="relative space-y-4 before:absolute before:bottom-2 before:left-[11px] before:top-2 before:w-px before:bg-slate-200 dark:before:bg-slate-800">
       {ordered.map((event) => (
-        <div key={event.event_id} className="border-l-2 border-slate-200 pl-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <StatusBadge value={event.severity} />
-            <span className="text-xs font-medium text-slate-500">{stageLabel(event.stage)}</span>
-            <span className="text-xs text-slate-400">{formatDate(event.created_at)}</span>
+        <div key={event.event_id} className="relative pl-8">
+          <div className={`absolute left-0 top-1.5 h-5 w-5 rounded-full border-4 border-white dark:border-slate-950 ${
+            event.severity === "error" ? "bg-red-500" : event.severity === "warning" ? "bg-amber-500" : "bg-blue-500"
+          }`} />
+          <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusBadge value={event.severity} />
+              <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">{stageLabel(event.stage)}</span>
+              <span className="text-xs text-slate-400">{formatDate(event.created_at)}</span>
+            </div>
+            <p className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-300">{eventMessage(event.message)}</p>
           </div>
-          <p className="mt-1 text-sm text-slate-700">{event.message}</p>
         </div>
       ))}
     </div>
   );
+}
+
+function eventMessage(message: string) {
+  if (/Built usage context/i.test(message)) return "Analytica prepared the dataset context for this investigation.";
+  if (/Prepared data sources/i.test(message)) return "Dataset context is ready.";
+  if (/Loaded CSV/i.test(message)) return "Dataset loaded for analysis.";
+  if (/Created an investigation artifact/i.test(message)) return "Saved a chart, table, or analytical output.";
+  if (/Generated a DecisionReport/i.test(message)) return "Prepared a report-ready summary.";
+  if (/Validation check/i.test(message)) return "Checked the analysis output.";
+  if (/Run completed|Analysis pass updated|Latest analytical pass is available/i.test(message)) return "Latest analytical pass is available.";
+  if (/semantic column notes/i.test(message)) return "No human notes are available yet; Analytica used inferred column roles.";
+  if (/sample rows/i.test(message)) return "Sample rows were unavailable, so context may be less detailed.";
+  return message.replace(/^.+?:\s*/, "");
 }

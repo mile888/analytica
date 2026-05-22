@@ -7,7 +7,9 @@ from fastapi.testclient import TestClient
 
 from source.api.app import app
 from source.api.deps import set_store_for_testing
+from source.dataframe import read_csv_dataset
 from source.product.data_context import build_data_source_usage_context
+from source.product.dataframe_resolver import resolve_dataframe_from_data_source
 from source.product.data_profiling import profile_csv, profile_dataframe
 from source.product.data_sources import (
     ColumnInferredRole,
@@ -25,6 +27,8 @@ from source.product.event_stream import (
     filter_events_after,
 )
 from source.product.investigation import (
+    ArtifactType,
+    InvestigationMessage,
     InvestigationRun,
     InvestigationRunEvent,
     InvestigationRunEventSeverity,
@@ -40,43 +44,58 @@ from source.product.store import InvestigationStore
 
 def test_create_list_get_data_source_in_memory_store() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders", data_source_type=DataSourceType.CSV, tags=[" Sales "]))
+    source = store.create_data_source(DataSource(name="Dataset", data_source_type=DataSourceType.CSV, tags=[" Metric "]))
 
-    assert store.get_data_source(source.data_source_id).name == "Orders"
+    assert store.get_data_source(source.data_source_id).name == "Dataset"
     assert store.list_data_sources()[0].data_source_id == source.data_source_id
-    assert source.tags == ["sales"]
+    assert source.tags == ["metric"]
 
 
 def test_profile_dataframe_and_empty_dataframe_work() -> None:
-    df = pd.DataFrame({"sales": [10.0, 20.0, None], "segment": ["a", "b", "a"]})
+    df = pd.DataFrame({"metric_value": [10.0, 20.0, None], "category_label": ["a", "b", "a"]})
     profile = profile_dataframe(df)
     empty = profile_dataframe(pd.DataFrame())
 
     assert profile.row_count == 3
     assert profile.column_count == 2
-    assert profile.missing_summary["sales"] == 1
-    assert "sales" in profile.numeric_summary
-    assert "segment" in profile.categorical_summary
+    assert profile.missing_summary["metric_value"] == 1
+    assert "metric_value" in profile.numeric_summary
+    assert "category_label" in profile.categorical_summary
     assert empty.row_count == 0
     assert empty.column_count == 0
 
 
 def test_profile_csv_works(tmp_path: Path) -> None:
-    path = tmp_path / "orders.csv"
-    path.write_text("sales,segment\n10,a\n20,b\n", encoding="utf-8")
+    path = tmp_path / "dataset.csv"
+    path.write_text("metric_value,category_label\n10,a\n20,b\n", encoding="utf-8")
 
     profile = profile_csv(path)
 
     assert profile.row_count == 2
-    assert [column.name for column in profile.columns] == ["sales", "segment"]
+    assert [column.name for column in profile.columns] == ["metric_value", "category_label"]
+
+
+def test_csv_reader_recovers_semicolon_delimiter_when_default_parse_glues_columns(tmp_path: Path) -> None:
+    path = tmp_path / "dataset.csv"
+    path.write_text("metric_value;category_label\n10;a\n20;b\n", encoding="utf-8")
+
+    df = read_csv_dataset(path)
+    profile = profile_csv(path)
+
+    assert list(df.columns) == ["metric_value", "category_label"]
+    assert df.to_dict(orient="records") == [
+        {"metric_value": 10, "category_label": "a"},
+        {"metric_value": 20, "category_label": "b"},
+    ]
+    assert profile.column_count == 2
 
 
 def test_profile_and_links_persist_in_sqlite(tmp_path: Path) -> None:
     db_path = tmp_path / "investigations.sqlite"
     store = SQLiteInvestigationStore(db_path)
-    source = store.create_data_source(DataSource(name="Orders", data_source_type=DataSourceType.CSV))
+    source = store.create_data_source(DataSource(name="Dataset", data_source_type=DataSourceType.CSV))
     investigation = store.create_investigation("Question")
-    profile = profile_dataframe(pd.DataFrame({"sales": [1, 2]}))
+    profile = profile_dataframe(pd.DataFrame({"metric_value": [1, 2]}))
 
     store.save_data_source_profile(source.data_source_id, profile)
     store.link_data_source_to_investigation(investigation.investigation_id, source.data_source_id)
@@ -86,7 +105,7 @@ def test_profile_and_links_persist_in_sqlite(tmp_path: Path) -> None:
     loaded_source = reloaded.get_data_source(source.data_source_id)
     loaded_profile = reloaded.get_data_source_profile(source.data_source_id)
 
-    assert reloaded.get_schema_version() == 11
+    assert reloaded.get_schema_version() == 14
     assert loaded_investigation.linked_data_source_ids == [source.data_source_id]
     assert loaded_source.linked_investigation_ids == [investigation.investigation_id]
     assert loaded_profile.row_count == 2
@@ -94,7 +113,7 @@ def test_profile_and_links_persist_in_sqlite(tmp_path: Path) -> None:
 
 def test_archive_data_source() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
+    source = store.create_data_source(DataSource(name="Dataset"))
 
     archived = store.archive_data_source(source.data_source_id)
 
@@ -109,20 +128,18 @@ def test_api_data_source_routes_work() -> None:
 
     created = client.post(
         "/data-sources",
-        json={"name": "Orders", "type": "csv", "location": "/tmp/orders.csv", "tags": ["Sales"]},
+        json={"name": "Dataset", "type": "csv", "location": "/tmp/dataset.csv", "tags": ["Metric Value"]},
     )
     source_id = created.json()["data_source_id"]
     listed = client.get("/data-sources")
     fetched = client.get(f"/data-sources/{source_id}")
-    updated = client.patch(f"/data-sources/{source_id}", json={"description": "Orders data", "tags": ["Revenue"]})
-    archived = client.post(f"/data-sources/{source_id}/archive")
+    updated = client.patch(f"/data-sources/{source_id}", json={"description": "Dataset data", "tags": ["Metric"]})
 
     assert created.status_code == 200
     assert listed.json()[0]["data_source_id"] == source_id
-    assert fetched.json()["name"] == "Orders"
-    assert updated.json()["description"] == "Orders data"
-    assert updated.json()["tags"] == ["revenue"]
-    assert archived.json()["status"] == "archived"
+    assert fetched.json()["name"] == "Dataset"
+    assert updated.json()["description"] == "Dataset data"
+    assert updated.json()["tags"] == ["metric"]
 
 
 def test_api_upload_csv_creates_source_saves_file_and_profile(tmp_path: Path, monkeypatch) -> None:
@@ -133,16 +150,16 @@ def test_api_upload_csv_creates_source_saves_file_and_profile(tmp_path: Path, mo
 
     response = client.post(
         "/data-sources/upload-csv",
-        data={"name": "Orders", "description": "Uploaded orders", "tags": ["Sales, Retail"]},
-        files={"file": ("orders.csv", b"sales,segment\n10,a\n20,b\n", "text/csv")},
+        data={"name": "Dataset", "description": "Uploaded dataset", "tags": ["Metric, Operations"]},
+        files={"file": ("dataset.csv", b"metric_value,category_label\n10,a\n20,b\n", "text/csv")},
     )
 
     assert response.status_code == 200
     payload = response.json()
     source = payload["data_source"]
-    assert source["name"] == "Orders"
+    assert source["name"] == "Dataset"
     assert source["data_source_type"] == "csv"
-    assert source["tags"] == ["sales", "retail"]
+    assert source["tags"] == ["metric", "operations"]
     assert Path(source["location"]).exists()
     assert Path(source["location"]).parent == Path(".analytica/uploads")
     assert payload["profile"]["row_count"] == 2
@@ -156,7 +173,7 @@ def test_api_upload_csv_rejects_non_csv(tmp_path: Path, monkeypatch) -> None:
 
     response = client.post(
         "/data-sources/upload-csv",
-        files={"file": ("orders.txt", b"sales\n10\n", "text/plain")},
+        files={"file": ("dataset.txt", b"metric_value\n10\n", "text/plain")},
     )
 
     assert response.status_code == 400
@@ -178,6 +195,21 @@ def test_api_upload_empty_csv_profiles_empty_frame(tmp_path: Path, monkeypatch) 
     assert response.json()["profile"]["column_count"] == 0
 
 
+def test_api_upload_ragged_csv_profiles_with_bad_lines_skipped(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    set_store_for_testing(InvestigationStore())
+    client = TestClient(app)
+
+    response = client.post(
+        "/data-sources/upload-csv",
+        files={"file": ("ragged.csv", b"metric_value,category_label\n10,a\n20,b,extra\n30,c\n", "text/csv")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["profile"]["row_count"] == 2
+    assert response.json()["profile"]["column_count"] == 2
+
+
 def test_api_upload_invalid_csv_returns_controlled_error(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     set_store_for_testing(InvestigationStore())
@@ -194,7 +226,7 @@ def test_api_upload_invalid_csv_returns_controlled_error(tmp_path: Path, monkeyp
 
 def test_api_create_investigation_links_data_source() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
+    source = store.create_data_source(DataSource(name="Dataset"))
     set_store_for_testing(store)
     client = TestClient(app)
 
@@ -209,7 +241,7 @@ def test_api_create_investigation_links_data_source() -> None:
 
 def test_investigation_service_links_data_source_before_run() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
+    source = store.create_data_source(DataSource(name="Dataset"))
     investigation = store.create_investigation("Question")
 
     def runner(**kwargs):
@@ -227,16 +259,16 @@ def test_investigation_service_links_data_source_before_run() -> None:
 
 def test_build_usage_context_with_full_profile_and_roles() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders", data_source_type=DataSourceType.CSV))
+    source = store.create_data_source(DataSource(name="Dataset", data_source_type=DataSourceType.CSV))
     profile = profile_dataframe(
         pd.DataFrame(
             {
                 "created_at": ["2026-01-01", "2026-01-02"],
-                "customer_id": ["c1", "c2"],
-                "sales": [10.0, 20.0],
-                "segment": ["enterprise", "smb"],
+                "entity_id": ["c1", "c2"],
+                "metric_value": [10.0, 20.0],
+                "category_label": ["group_a", "group_b"],
                 "notes": [
-                    "This customer provided a long qualitative note that should be treated as text.",
+                    "This entity provided a long qualitative note that should be treated as text.",
                     "Another long qualitative note with enough words to look like free-form text.",
                 ],
             }
@@ -249,15 +281,15 @@ def test_build_usage_context_with_full_profile_and_roles() -> None:
 
     assert context.schema_summary["row_count"] == 2
     assert roles["created_at"] == ColumnInferredRole.TIMESTAMP
-    assert roles["customer_id"] == ColumnInferredRole.IDENTIFIER
-    assert roles["sales"] == ColumnInferredRole.METRIC
-    assert roles["segment"] == ColumnInferredRole.DIMENSION
+    assert roles["entity_id"] == ColumnInferredRole.IDENTIFIER
+    assert roles["metric_value"] == ColumnInferredRole.METRIC
+    assert roles["category_label"] == ColumnInferredRole.DIMENSION
     assert roles["notes"] == ColumnInferredRole.TEXT
 
 
 def test_build_usage_context_without_profile_does_not_crash() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
+    source = store.create_data_source(DataSource(name="Dataset"))
 
     context = build_data_source_usage_context(store, source.data_source_id)
 
@@ -267,31 +299,31 @@ def test_build_usage_context_without_profile_does_not_crash() -> None:
 
 def test_usage_context_caveats_for_archived_source_and_missing_values() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders", status=DataSourceStatus.ARCHIVED))
-    profile = profile_dataframe(pd.DataFrame({"sales": [None, None, 3.0]}))
+    source = store.create_data_source(DataSource(name="Dataset", status=DataSourceStatus.ARCHIVED))
+    profile = profile_dataframe(pd.DataFrame({"metric_value": [None, None, 3.0]}))
     store.save_data_source_profile(source.data_source_id, profile)
 
     context = build_data_source_usage_context(store, source.data_source_id)
 
     assert "Source status is archived." in context.caveats
-    assert "Column sales has high missingness." in context.caveats
+    assert "Column metric_value has high missingness." in context.caveats
 
 
 def test_usage_context_includes_previous_questions_from_linked_investigations() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
-    investigation = store.create_investigation("Why did revenue change?")
+    source = store.create_data_source(DataSource(name="Dataset"))
+    investigation = store.create_investigation("Why did metric change?")
     store.link_data_source_to_investigation(investigation.investigation_id, source.data_source_id)
 
     context = build_data_source_usage_context(store, source.data_source_id)
 
-    assert context.previous_questions == ["Why did revenue change?"]
+    assert context.previous_questions == ["Why did metric change?"]
 
 
 def test_api_usage_context_endpoint_works() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
-    store.save_data_source_profile(source.data_source_id, profile_dataframe(pd.DataFrame({"sales": [1, 2]})))
+    source = store.create_data_source(DataSource(name="Dataset"))
+    store.save_data_source_profile(source.data_source_id, profile_dataframe(pd.DataFrame({"metric_value": [1, 2]})))
     set_store_for_testing(store)
     client = TestClient(app)
 
@@ -304,8 +336,8 @@ def test_api_usage_context_endpoint_works() -> None:
 
 def test_investigation_service_passes_usage_context_to_runner_for_linked_source() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
-    store.save_data_source_profile(source.data_source_id, profile_dataframe(pd.DataFrame({"sales": [1, 2]})))
+    source = store.create_data_source(DataSource(name="Dataset"))
+    store.save_data_source_profile(source.data_source_id, profile_dataframe(pd.DataFrame({"metric_value": [1, 2]})))
     investigation = store.create_investigation("What changed?")
     store.link_data_source_to_investigation(investigation.investigation_id, source.data_source_id)
     captured = {}
@@ -319,13 +351,13 @@ def test_investigation_service_passes_usage_context_to_runner_for_linked_source(
 
     context = captured["data_context"]
     assert context["data_source_ids"] == [source.data_source_id]
-    assert context["data_source_usage_contexts"][0]["name"] == "Orders"
+    assert context["data_source_usage_contexts"][0]["name"] == "Dataset"
     assert "Data source usage context" in context["data_context_prompt"]
 
 
 def test_empty_semantic_notes_load_by_default() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
+    source = store.create_data_source(DataSource(name="Dataset"))
 
     notes = store.get_data_source_semantic_notes(source.data_source_id)
 
@@ -336,16 +368,16 @@ def test_empty_semantic_notes_load_by_default() -> None:
 def test_semantic_notes_persist_in_sqlite(tmp_path: Path) -> None:
     db_path = tmp_path / "investigations.sqlite"
     store = SQLiteInvestigationStore(db_path)
-    source = store.create_data_source(DataSource(name="Orders"))
+    source = store.create_data_source(DataSource(name="Dataset"))
     notes = DataSourceSemanticNotes(
         data_source_id=source.data_source_id,
-        source_description="Orders source",
+        source_description="Dataset source",
         business_context="US market only",
         global_caveats=["Returns are not included"],
         column_notes=[
             ColumnSemanticNote(
-                column_name="Sales",
-                business_meaning="Revenue amount before discount",
+                column_name="Metric Value",
+                business_meaning="Metric amount before discount",
                 semantic_role=ColumnSemanticRole.TARGET,
             )
         ],
@@ -355,7 +387,7 @@ def test_semantic_notes_persist_in_sqlite(tmp_path: Path) -> None:
     reloaded = SQLiteInvestigationStore(db_path)
     loaded = reloaded.get_data_source_semantic_notes(source.data_source_id)
 
-    assert reloaded.get_schema_version() == 11
+    assert reloaded.get_schema_version() == 14
     assert loaded.business_context == "US market only"
     assert loaded.global_caveats == ["Returns are not included"]
     assert loaded.column_notes[0].semantic_role == ColumnSemanticRole.TARGET
@@ -363,35 +395,35 @@ def test_semantic_notes_persist_in_sqlite(tmp_path: Path) -> None:
 
 def test_update_and_delete_column_semantic_note() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
+    source = store.create_data_source(DataSource(name="Dataset"))
 
     updated = store.update_column_semantic_note(
         source.data_source_id,
-        "Sales",
+        "Metric Value",
         ColumnSemanticNote(
-            column_name="Sales",
-            description="Revenue",
+            column_name="Metric Value",
+            description="Metric",
             semantic_role=ColumnSemanticRole.METRIC,
         ),
     )
-    assert updated.column_notes[0].description == "Revenue"
+    assert updated.column_notes[0].description == "Metric"
 
-    deleted = store.delete_column_semantic_note(source.data_source_id, "Sales")
+    deleted = store.delete_column_semantic_note(source.data_source_id, "Metric Value")
 
     assert deleted.column_notes == []
 
 
 def test_semantic_role_overrides_usage_context_role_and_adds_notes() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
-    store.save_data_source_profile(source.data_source_id, profile_dataframe(pd.DataFrame({"Sales": [1.0, 2.0]})))
+    source = store.create_data_source(DataSource(name="Dataset"))
+    store.save_data_source_profile(source.data_source_id, profile_dataframe(pd.DataFrame({"Metric Value": [1.0, 2.0]})))
     store.update_column_semantic_note(
         source.data_source_id,
-        "Sales",
+        "Metric Value",
         ColumnSemanticNote(
-            column_name="Sales",
-            display_name="Revenue",
-            business_meaning="Revenue amount before discount",
+            column_name="Metric Value",
+            display_name="Metric",
+            business_meaning="Metric amount before discount",
             semantic_role=ColumnSemanticRole.TARGET,
             caveats=["Excludes returns"],
             examples=["100.25"],
@@ -399,35 +431,35 @@ def test_semantic_role_overrides_usage_context_role_and_adds_notes() -> None:
     )
 
     context = build_data_source_usage_context(store, source.data_source_id)
-    sales = context.column_summaries[0]
+    metric_value = context.column_summaries[0]
 
-    assert sales.inferred_role == ColumnSemanticRole.TARGET
-    assert any("overrides deterministic role metric" in note for note in sales.notes)
-    assert any("Business meaning: Revenue amount before discount." in note for note in sales.notes)
+    assert metric_value.inferred_role == ColumnSemanticRole.TARGET
+    assert any("overrides deterministic role metric" in note for note in metric_value.notes)
+    assert any("Business meaning: Metric amount before discount." in note for note in metric_value.notes)
 
 
 def test_semantic_context_and_caveats_appear_in_usage_context() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders", description="Raw order export"))
+    source = store.create_data_source(DataSource(name="Dataset", description="Raw dataset export"))
     store.save_data_source_semantic_notes(
         DataSourceSemanticNotes(
             data_source_id=source.data_source_id,
-            source_description="Curated orders table",
-            business_context="Used for revenue reporting",
+            source_description="Curated dataset table",
+            business_context="Used for metric reporting",
             global_caveats=["US market only"],
         )
     )
 
     context = build_data_source_usage_context(store, source.data_source_id)
 
-    assert "Curated orders table" in context.description
-    assert "Used for revenue reporting" in context.description
+    assert "Curated dataset table" in context.description
+    assert "Used for metric reporting" in context.description
     assert "US market only" in context.caveats
 
 
 def test_api_semantic_notes_endpoints_work() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
+    source = store.create_data_source(DataSource(name="Dataset"))
     set_store_for_testing(store)
     client = TestClient(app)
 
@@ -435,20 +467,20 @@ def test_api_semantic_notes_endpoints_work() -> None:
     saved = client.put(
         f"/data-sources/{source.data_source_id}/semantic-notes",
         json={
-            "source_description": "Orders source",
-            "business_context": "Retail revenue",
+            "source_description": "Dataset source",
+            "business_context": "Operations metric",
             "global_caveats": ["US only"],
         },
     )
     patched = client.patch(
-        f"/data-sources/{source.data_source_id}/semantic-notes/columns/Sales",
-        json={"business_meaning": "Revenue before discount", "semantic_role": "metric"},
+        f"/data-sources/{source.data_source_id}/semantic-notes/columns/Metric Value",
+        json={"business_meaning": "Metric before discount", "semantic_role": "metric"},
     )
-    deleted = client.delete(f"/data-sources/{source.data_source_id}/semantic-notes/columns/Sales")
+    deleted = client.delete(f"/data-sources/{source.data_source_id}/semantic-notes/columns/Metric Value")
 
     assert default_response.status_code == 200
     assert default_response.json()["column_notes"] == []
-    assert saved.json()["business_context"] == "Retail revenue"
+    assert saved.json()["business_context"] == "Operations metric"
     assert patched.json()["column_notes"][0]["semantic_role"] == "metric"
     assert deleted.json()["column_notes"] == []
 
@@ -475,21 +507,21 @@ def test_create_list_investigation_runs_in_memory_store() -> None:
 
 def test_investigation_run_service_builds_context_and_completes() -> None:
     store = InvestigationStore()
-    source = store.create_data_source(DataSource(name="Orders"))
-    store.save_data_source_profile(source.data_source_id, profile_dataframe(pd.DataFrame({"Sales": [1, 2]})))
+    source = store.create_data_source(DataSource(name="Dataset"))
+    store.save_data_source_profile(source.data_source_id, profile_dataframe(pd.DataFrame({"Metric Value": [1, 2]})))
     store.update_column_semantic_note(
         source.data_source_id,
-        "Sales",
+        "Metric Value",
         ColumnSemanticNote(
-            column_name="Sales",
-            business_meaning="Revenue amount",
+            column_name="Metric Value",
+            business_meaning="Metric amount",
             semantic_role=ColumnSemanticRole.TARGET,
         ),
     )
     investigation = store.create_investigation("What changed?")
 
     def runner(**kwargs):
-        return {"summary": "Done", "key_findings": ["Sales changed"]}
+        return {"summary": "Done", "key_findings": ["Metric Value changed"]}
 
     service = InvestigationRunService(
         store=store,
@@ -505,11 +537,11 @@ def test_investigation_run_service_builds_context_and_completes() -> None:
 
 
 def test_investigation_run_service_loads_uploaded_csv_dataframe(tmp_path: Path) -> None:
-    csv_path = tmp_path / "orders.csv"
-    csv_path.write_text("sales,segment\n10,a\n20,b\n", encoding="utf-8")
+    csv_path = tmp_path / "dataset.csv"
+    csv_path.write_text("metric_value,category_label\n10,a\n20,b\n", encoding="utf-8")
     store = InvestigationStore()
     source = store.create_data_source(
-        DataSource(name="Orders", data_source_type=DataSourceType.CSV, location=str(csv_path))
+        DataSource(name="Dataset", data_source_type=DataSourceType.CSV, location=str(csv_path))
     )
     store.save_data_source_profile(source.data_source_id, profile_csv(csv_path))
     investigation = store.create_investigation("What changed?")
@@ -517,7 +549,7 @@ def test_investigation_run_service_loads_uploaded_csv_dataframe(tmp_path: Path) 
 
     def runner(**kwargs):
         captured.update(kwargs)
-        return {"summary": "Done", "key_findings": ["Sales changed"]}
+        return {"summary": "Done", "key_findings": ["Metric Value changed"]}
 
     service = InvestigationRunService(
         store=store,
@@ -527,7 +559,178 @@ def test_investigation_run_service_loads_uploaded_csv_dataframe(tmp_path: Path) 
 
     assert run.status == InvestigationRunStatus.COMPLETED
     assert captured["df"].shape == (2, 2)
-    assert list(captured["df"].columns) == ["sales", "segment"]
+    assert list(captured["df"].columns) == ["metric_value", "category_label"]
+
+
+def test_dataframe_resolver_loads_relative_project_csv_path(tmp_path: Path, monkeypatch) -> None:
+    relative_path = Path(".analytica/uploads/dataset.csv")
+    csv_path = tmp_path / relative_path
+    csv_path.parent.mkdir(parents=True)
+    csv_path.write_text("metric_value,category_label\n10,a\n20,b\n", encoding="utf-8")
+    monkeypatch.setattr("source.product.dataframe_resolver.PROJECT_ROOT", tmp_path)
+    store = InvestigationStore()
+    source = store.create_data_source(
+        DataSource(name="Dataset", data_source_type=DataSourceType.CSV, location=str(relative_path))
+    )
+
+    df = resolve_dataframe_from_data_source(store, source.data_source_id)
+
+    assert df is not None
+    assert df.shape == (2, 2)
+    assert list(df.columns) == ["metric_value", "category_label"]
+
+
+def test_dataframe_resolver_missing_file_returns_none(tmp_path: Path) -> None:
+    store = InvestigationStore()
+    source = store.create_data_source(
+        DataSource(name="Dataset", data_source_type=DataSourceType.CSV, location=str(tmp_path / "missing.csv"))
+    )
+
+    assert resolve_dataframe_from_data_source(store, source.data_source_id) is None
+
+
+def test_follow_up_run_uses_linked_csv_for_concrete_group_analysis(tmp_path: Path) -> None:
+    csv_path = tmp_path / "careers.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "Job_Title,Salary_LPA",
+                "Research Scientist,80",
+                "Research Scientist,120",
+                "NLP Engineer,90",
+                "NLP Engineer,95",
+                "UI Designer,40",
+                "UI Designer,45",
+                "Support Analyst,50",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    store = InvestigationStore()
+    source = store.create_data_source(
+        DataSource(name="Careers", data_source_type=DataSourceType.CSV, location=str(csv_path))
+    )
+    store.save_data_source_profile(source.data_source_id, profile_csv(csv_path))
+    investigation = store.create_investigation("What can you say about this dataset?")
+    message = store.add_investigation_message(
+        InvestigationMessage(
+            investigation_id=investigation.investigation_id,
+            content="How does Salary_LPA vary across Job_Title?",
+        )
+    )
+
+    def error_runner(**kwargs):
+        return {"exec_error": "runner unavailable", "critic_verdict": "ERROR"}
+
+    service = InvestigationRunService(
+        store=store,
+        investigation_service=InvestigationService(store=store, runner=error_runner),
+    )
+    run = service.run_investigation(
+        investigation.investigation_id,
+        data_source_ids=[source.data_source_id],
+        message_id=message.message_id,
+    )
+    updated = store.get_investigation(investigation.investigation_id)
+
+    assert run.status == InvestigationRunStatus.COMPLETED
+    assert "Research Scientist" in updated.report.summary
+    assert "UI Designer" in updated.report.summary
+    assert "100.00" in updated.report.summary
+    assert any(artifact.artifact_type == ArtifactType.CHART for artifact in updated.artifacts)
+
+
+def test_unusual_group_follow_up_uses_concrete_groups_from_csv(tmp_path: Path) -> None:
+    csv_path = tmp_path / "careers.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "Job_Title,Salary_LPA",
+                "Research Scientist,75",
+                "Research Scientist,150",
+                "Research Scientist,82",
+                "NLP Engineer,88",
+                "NLP Engineer,90",
+                "NLP Engineer,92",
+                "UI Designer,40",
+                "UI Designer,42",
+                "UI Designer,43",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    store = InvestigationStore()
+    source = store.create_data_source(
+        DataSource(name="Careers", data_source_type=DataSourceType.CSV, location=str(csv_path))
+    )
+    investigation = store.create_investigation("What can you say about this dataset?")
+
+    def error_runner(**kwargs):
+        return {"exec_error": "runner unavailable", "critic_verdict": "ERROR"}
+
+    service = InvestigationRunService(
+        store=store,
+        investigation_service=InvestigationService(store=store, runner=error_runner),
+    )
+    run = service.run_investigation(
+        investigation.investigation_id,
+        data_source_ids=[source.data_source_id],
+        message_id=store.add_investigation_message(
+            InvestigationMessage(
+                investigation_id=investigation.investigation_id,
+                content="Which Job_Title groups have unusual Salary_LPA values?",
+            )
+        ).message_id,
+    )
+    updated = store.get_investigation(investigation.investigation_id)
+
+    assert run.status == InvestigationRunStatus.COMPLETED
+    assert "Research Scientist" in updated.report.summary
+    assert "widest spread" in updated.report.summary.lower()
+    assert any("Unusual Salary_LPA groups" in artifact.title for artifact in updated.artifacts)
+
+
+def test_chart_follow_up_uses_previous_metric_by_category_intent(tmp_path: Path) -> None:
+    csv_path = tmp_path / "careers.csv"
+    csv_path.write_text(
+        "Job_Title,Salary_LPA,Applicants\nAI Engineer,80,20\nAI Engineer,100,30\nDesigner,40,12\nDesigner,45,10\n",
+        encoding="utf-8",
+    )
+    store = InvestigationStore()
+    source = store.create_data_source(
+        DataSource(name="Careers", data_source_type=DataSourceType.CSV, location=str(csv_path))
+    )
+    investigation = store.create_investigation("What can you say about this dataset?")
+    store.add_investigation_message(
+        InvestigationMessage(
+            investigation_id=investigation.investigation_id,
+            content="How does Salary_LPA vary across Job_Title?",
+        )
+    )
+    chart_message = store.add_investigation_message(
+        InvestigationMessage(
+            investigation_id=investigation.investigation_id,
+            content="Build a chart.",
+        )
+    )
+
+    def error_runner(**kwargs):
+        return {"exec_error": "runner unavailable", "critic_verdict": "ERROR"}
+
+    service = InvestigationRunService(
+        store=store,
+        investigation_service=InvestigationService(store=store, runner=error_runner),
+    )
+    run = service.run_investigation(
+        investigation.investigation_id,
+        data_source_ids=[source.data_source_id],
+        message_id=chart_message.message_id,
+    )
+    updated = store.get_investigation(investigation.investigation_id)
+    chart_titles = [artifact.title for artifact in updated.artifacts if artifact.artifact_type == ArtifactType.CHART]
+
+    assert run.status == InvestigationRunStatus.COMPLETED
+    assert any("Salary_LPA" in title and "Job_Title" in title for title in chart_titles)
 
 
 def test_investigation_run_service_failed_run_stores_error() -> None:
@@ -563,7 +766,7 @@ def test_investigation_runs_persist_in_sqlite(tmp_path: Path) -> None:
     reloaded = SQLiteInvestigationStore(db_path)
     loaded = reloaded.get_investigation_run(run.run_id)
 
-    assert reloaded.get_schema_version() == 11
+    assert reloaded.get_schema_version() == 14
     assert loaded.current_stage == InvestigationRunStage.RUNNING_ANALYSIS
     assert reloaded.list_runs_for_investigation(investigation.investigation_id)[0].run_id == run.run_id
 
@@ -578,7 +781,14 @@ def test_api_run_endpoints_work(monkeypatch) -> None:
         def __init__(self, store):
             self.store = store
 
-        def run_investigation(self, investigation_id, data_source_ids=None, force_refresh_context=False):
+        def run_investigation(
+            self,
+            investigation_id,
+            data_source_ids=None,
+            force_refresh_context=False,
+            message_id=None,
+            analysis_mode="exploration",
+        ):
             return self.store.create_investigation_run(
                 InvestigationRun(
                     investigation_id=investigation_id,
@@ -655,7 +865,7 @@ def test_run_events_persist_in_sqlite(tmp_path: Path) -> None:
     reloaded = SQLiteInvestigationStore(db_path)
     events = reloaded.list_investigation_run_events(run.run_id)
 
-    assert reloaded.get_schema_version() == 11
+    assert reloaded.get_schema_version() == 14
     assert events[0].event_id == event.event_id
     assert events[0].severity == InvestigationRunEventSeverity.WARNING
     assert events[0].metadata["data_source_id"] == "ds_missing"
@@ -716,7 +926,7 @@ def test_api_run_events_endpoints_work(monkeypatch) -> None:
             investigation_id=investigation.investigation_id,
             event_type=InvestigationRunEventType.INFO,
             stage=InvestigationRunStage.COMPLETED,
-            message="Run completed.",
+            message="Latest analytical pass is available.",
         )
     )
     set_store_for_testing(store)
@@ -729,7 +939,7 @@ def test_api_run_events_endpoints_work(monkeypatch) -> None:
     assert run_events.json()["events"][0]["event_id"] == event.event_id
     assert run_events.json()["next_cursor"]
     assert investigation_events.status_code == 200
-    assert investigation_events.json()["events"][0]["message"] == "Run completed."
+    assert investigation_events.json()["events"][0]["message"] == "Latest analytical pass is available."
 
 
 def test_event_cursor_roundtrip_and_filtering() -> None:

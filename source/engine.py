@@ -16,11 +16,6 @@ import pandas as pd
 
 from source.llm.llm_config import EngineName
 
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Base class
-# ═══════════════════════════════════════════════════════════════════════
-
 class BaseEngine(ABC):
     """Abstract compute engine with two responsibilities:
     1. **Data loading** — read from files (CSV, Parquet, Excel) or databases (SQL).
@@ -28,8 +23,6 @@ class BaseEngine(ABC):
     """
 
     name: EngineName
-
-    # ── Data loading ────────────────────────────────────────────────
 
     @abstractmethod
     def read_csv(self, path: str, **kwargs: Any) -> Any:
@@ -46,8 +39,6 @@ class BaseEngine(ABC):
     @abstractmethod
     def read_sql(self, query: str, connection: Any, **kwargs: Any) -> Any:
         """Execute a SQL query and return results in the engine's native format."""
-
-    # ── Data processing ─────────────────────────────────────────────
 
     @abstractmethod
     def ensure_table(self, df: Any) -> Any:
@@ -66,14 +57,8 @@ class BaseEngine(ABC):
         """Build the sandbox environment dict for safe_exec."""
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  Pandas
-# ═══════════════════════════════════════════════════════════════════════
-
 class PandasEngine(BaseEngine):
     name: EngineName = "pandas"
-
-    # ── Loading ─────────────────────────────────────────────────────
 
     def read_csv(self, path: str, **kwargs: Any) -> pd.DataFrame:
         return pd.read_csv(path, **kwargs)
@@ -87,8 +72,6 @@ class PandasEngine(BaseEngine):
     def read_sql(self, query: str, connection: Any, **kwargs: Any) -> pd.DataFrame:
         return pd.read_sql(query, connection, **kwargs)
 
-    # ── Processing ──────────────────────────────────────────────────
-
     def ensure_table(self, df: Any) -> pd.DataFrame:
         if isinstance(df, pd.DataFrame):
             return df
@@ -97,20 +80,34 @@ class PandasEngine(BaseEngine):
     def to_pandas(self, df: Any, cols: Optional[Sequence[str]] = None) -> pd.DataFrame:
         if isinstance(df, pd.DataFrame):
             return df[list(cols)].copy() if cols else df.copy()
+        if df is None:
+            return pd.DataFrame()
+        if isinstance(df, dict):
+            try:
+                out = pd.DataFrame(df)
+            except ValueError:
+                out = pd.DataFrame([df])
+            return out[list(cols)].copy() if cols and not out.empty else out.copy()
+        if isinstance(df, (list, tuple)):
+            if not df:
+                return pd.DataFrame()
+            try:
+                out = pd.DataFrame(df)
+            except ValueError:
+                out = pd.DataFrame({"value": list(df)})
+            return out[list(cols)].copy() if cols and not out.empty else out.copy()
 
-        # Try polars
         try:
             import polars as pl
             if isinstance(df, pl.DataFrame):
                 out = df.select(cols) if cols else df
                 return out.to_pandas()
-            if hasattr(df, "collect"):  # LazyFrame
+            if hasattr(df, "collect"):
                 lf = df.select(cols) if cols else df
                 return lf.collect().to_pandas()
         except Exception:
             pass
 
-        # Try spark
         try:
             if hasattr(df, "toPandas"):
                 sdf = df.select(*cols) if cols else df
@@ -150,18 +147,12 @@ class PandasEngine(BaseEngine):
         return env
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  Polars
-# ═══════════════════════════════════════════════════════════════════════
-
 class PolarsEngine(BaseEngine):
     name: EngineName = "polars"
 
     def _import_polars(self):
         import polars as pl
         return pl
-
-    # ── Loading ─────────────────────────────────────────────────────
 
     def read_csv(self, path: str, **kwargs: Any) -> Any:
         pl = self._import_polars()
@@ -180,8 +171,6 @@ class PolarsEngine(BaseEngine):
         df = pd.read_sql(query, connection, **kwargs)
         return pl.from_pandas(df).lazy()
 
-    # ── Processing ──────────────────────────────────────────────────
-
     def ensure_table(self, df: Any) -> Any:
         pl = self._import_polars()
         if isinstance(df, pl.DataFrame):
@@ -189,20 +178,21 @@ class PolarsEngine(BaseEngine):
         if isinstance(df, pd.DataFrame):
             return pl.from_pandas(df).lazy()
         if hasattr(df, "collect") and hasattr(df, "schema"):
-            return df  # already a LazyFrame
-        raise TypeError("Cannot convert df to polars LazyFrame")
+            return df
+        pdf = PandasEngine().to_pandas(df)
+        return pl.from_pandas(pdf).lazy()
 
     def to_pandas(self, df: Any, cols: Optional[Sequence[str]] = None) -> pd.DataFrame:
         pl = self._import_polars()
         if isinstance(df, pl.DataFrame):
             out = df.select(cols) if cols else df
             return out.to_pandas()
-        if hasattr(df, "collect"):  # LazyFrame
+        if hasattr(df, "collect"):
             lf = df.select(cols) if cols else df
             return lf.collect().to_pandas()
         if isinstance(df, pd.DataFrame):
             return df[list(cols)].copy() if cols else df.copy()
-        raise TypeError("Unsupported table type for to_pandas")
+        return PandasEngine().to_pandas(df, cols)
 
     def schema_text(self, df: Any) -> str:
         try:
@@ -240,18 +230,12 @@ class PolarsEngine(BaseEngine):
         return env
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  Spark
-# ═══════════════════════════════════════════════════════════════════════
-
 class SparkEngine(BaseEngine):
     name: EngineName = "spark"
 
     def _get_spark(self):
         from pyspark.sql import SparkSession
         return SparkSession.builder.getOrCreate()
-
-    # ── Loading ─────────────────────────────────────────────────────
 
     def read_csv(self, path: str, **kwargs: Any) -> Any:
         spark = self._get_spark()
@@ -264,7 +248,6 @@ class SparkEngine(BaseEngine):
         return spark.read.parquet(path, **kwargs)
 
     def read_excel(self, path: str, **kwargs: Any) -> Any:
-        # Spark has no built-in Excel reader — fall back via pandas
         pdf = pd.read_excel(path, **kwargs)
         spark = self._get_spark()
         return spark.createDataFrame(pdf)
@@ -272,21 +255,16 @@ class SparkEngine(BaseEngine):
     def read_sql(self, query: str, connection: Any, **kwargs: Any) -> Any:
         spark = self._get_spark()
         if isinstance(connection, str):
-            # JDBC connection string
             return spark.read.format("jdbc").option("url", connection).option("query", query).load()
-        # Fall back via pandas
         pdf = pd.read_sql(query, connection, **kwargs)
         return spark.createDataFrame(pdf)
 
-    # ── Processing ──────────────────────────────────────────────────
-
     def ensure_table(self, df: Any) -> Any:
         if hasattr(df, "select") and hasattr(df, "schema") and hasattr(df, "limit"):
-            return df  # already a Spark DataFrame
-        if isinstance(df, pd.DataFrame):
-            spark = self._get_spark()
-            return spark.createDataFrame(df)
-        raise TypeError("Cannot convert df to Spark DataFrame")
+            return df
+        pdf = df if isinstance(df, pd.DataFrame) else PandasEngine().to_pandas(df)
+        spark = self._get_spark()
+        return spark.createDataFrame(pdf)
 
     def to_pandas(self, df: Any, cols: Optional[Sequence[str]] = None) -> pd.DataFrame:
         if isinstance(df, pd.DataFrame):
@@ -294,7 +272,7 @@ class SparkEngine(BaseEngine):
         if hasattr(df, "toPandas"):
             sdf = df.select(*cols) if cols else df
             return sdf.toPandas()
-        raise TypeError("Unsupported table type for to_pandas")
+        return PandasEngine().to_pandas(df, cols)
 
     def schema_text(self, df: Any) -> str:
         try:
@@ -330,10 +308,6 @@ class SparkEngine(BaseEngine):
             env["plt"] = None
         return env
 
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Factory
-# ═══════════════════════════════════════════════════════════════════════
 
 _ENGINE_REGISTRY: Dict[str, type[BaseEngine]] = {
     "pandas": PandasEngine,

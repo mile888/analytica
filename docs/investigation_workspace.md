@@ -1,5 +1,8 @@
 # Investigation Workspace
 
+For the repository-level folder and layer map, see
+[architecture.md](architecture.md).
+
 Analytica is gaining a product layer centered on an `Investigation`, not a chat
 session. An Investigation is a user-owned analytical workspace for moving from a
 business question to reviewed artifacts and a DecisionReport.
@@ -14,9 +17,9 @@ question -> investigation -> artifacts -> report -> review
 
 An Investigation represents an analytical question such as:
 
-- "Как режим доставки связан с объемом продаж?"
-- "Какие сегменты клиентов дают наибольшие продажи?"
-- "В каких регионах продажи выше или ниже среднего?"
+- "Summarize this dataset and identify useful analysis directions."
+- "Which groups or categories differ the most?"
+- "Are there unusual values, anomalies, or data quality issues?"
 
 Each Investigation keeps:
 
@@ -58,7 +61,14 @@ from deepagents import create_deep_agent
 agent = create_deep_agent(
     model=...,
     tools=...,
-    skills=["/source/skills/"],
+    system_prompt=...,
+    skills=[
+        "/source/skills/data-analysis/",
+        "/source/skills/csv-dataframe-analysis/",
+        "/source/skills/visualization/",
+        "/source/skills/business-analysis/",
+        "/source/skills/reporting/",
+    ],
     memory=["/memories/AGENTS.md"],
     backend=CompositeBackend(
         default=StateBackend(),
@@ -85,7 +95,8 @@ The agent now follows the official DeepAgents context engineering pattern:
 - durable agent memory is exposed at `/memories/`
 - physical memory files live under `.analytica/memory/`
 - long artifacts can be exposed through `/artifacts/`
-- skills are exposed through the filesystem backend at `/source/skills/`
+- skills are exposed through the filesystem backend at `/source/skills/` and
+  passed as explicit source directories containing `SKILL.md`
 - large intermediate outputs should be written to filesystem artifacts instead
   of being repeatedly inserted into the prompt
 
@@ -114,6 +125,23 @@ argument. The agent gets built-in DeepAgents filesystem, todo, summarization,
 skills, memory, and subagent behavior from the SDK instead of duplicate custom
 wrappers.
 
+## Planner, Branches, And Fallbacks
+
+Analytica is a Deep Agent-native analytical copilot:
+
+- Deep Agent orchestrates work, chooses tools, uses skills, manages
+  filesystem/context, and synthesizes final answers.
+- Tools compute deterministic results, create charts/artifacts, and validate
+  correctness.
+- `AuthoritativeExecutionPlanner` builds structured query plans, preserves
+  filters and aliases, keeps chart intent, and blocks unsafe substitutions.
+- `BranchWorkspaceManager` stores branch metadata for multiple analytical
+  branches inside one investigation. It consumes query plans and does not parse
+  raw user text independently.
+- The product layer handles API/session/persistence/display. Its deterministic
+  fallback is a safety mechanism for runner errors, empty answers, or missing
+  artifacts, not a second reasoning engine.
+
 `InvestigationService` runs the existing agent through dependency injection. The
 default runner calls the current `source.agent.run_once` function. Agent output
 is translated by `agent_output_to_investigation_update`, which maps summaries,
@@ -122,12 +150,25 @@ timeline into product objects.
 
 ## Current implementation
 
+- `source/api/`: FastAPI product backend and thin route handlers.
 - `source/product/investigation.py`: product domain models.
+- `source/product/data_sources.py`: Data Source Registry models.
+- `source/product/data_profiling.py`: lightweight pandas profiling.
+- `source/product/data_context.py`: compact usage context for agent/UI.
+- `source/product/semantic_layer.py`: shared semantic column understanding and
+  active investigation focus.
+- `source/product/question_suggestions.py`: universal and data-aware question suggestions.
+- `source/product/run_service.py`: API-driven InvestigationRun orchestration.
+- `source/product/event_stream.py`: polling-friendly run event cursors.
+- `source/product/report_builder.py`, `report_service.py`, `readiness.py`: report, review, versioning, and readiness workflows.
+- `source/product/final_report_registry.py`: final snapshot listing helpers.
 - `source/product/store.py`: in-memory `InvestigationStore`.
 - `source/product/sqlite_store.py`: persistent SQLite store.
 - `source/product/store_factory.py`: store backend selection from environment.
 - `source/product/migrations.py`: SQLite schema migrations.
-- `source/product/exporter.py`: Markdown and HTML export helpers.
+- `source/product/exporter.py`: TXT, Markdown, and HTML export helpers.
+- `pages/`: Streamlit temporary/demo clients.
+- `frontend/`: thin Next.js Decision Workspace shell over the FastAPI backend.
 - `source/product/data_sources.py`: Data Source Registry domain models.
 - `source/product/data_profiling.py`: lightweight pandas profiling for data
   sources.
@@ -136,8 +177,8 @@ timeline into product objects.
 - `source/product/report_service.py`: editable ShareableReport workflow and
   version snapshots.
 - `source/product/readiness.py`: lightweight report readiness checks.
-- `source/product/final_report_registry.py`: Published Reports Library listing
-  and summaries.
+- `source/product/final_report_registry.py`: final snapshot listing and
+  summaries.
 - `source/product/adapter.py`: robust adapter from agent output to product
   artifacts, findings, report, and trace.
 - `source/product/service.py`: service layer connecting the store to the agent
@@ -146,10 +187,26 @@ timeline into product objects.
   reports.
 - `pages/Investigation_Workspace.py`: temporary Streamlit workspace UI.
 - `pages/Data_Sources.py`: temporary Streamlit Data Source Registry UI.
-- `pages/Published_Reports.py`: Published Reports Library UI.
 
 The in-memory store remains available for tests and fallback. The app defaults
 to SQLite persistence.
+
+## Semantic analytical continuity
+
+The workspace uses one shared semantic understanding layer for fallback
+analysis, chart intent, and suggested questions. It builds a
+`SemanticDatasetProfile` from the raw dataframe or saved data-source profile,
+then infers which columns behave like metrics, grouping dimensions, time axes,
+identifiers, or text fields.
+
+Follow-up analysis also receives a compact `InvestigationFocus` derived from the
+latest chart and recent analytical outputs. This lets ambiguous questions keep
+working against the current analytical thread, while explicit wording in the new
+question still overrides stale context.
+
+Structured findings carry report-ready metadata such as conclusion, confidence,
+evidence strength, limitation, business implication, and recommended validation.
+Reports prefer those structured fields over raw metadata or workflow details.
 
 ## API-first architecture
 
@@ -352,7 +409,7 @@ async worker model without changing the future frontend.
 ## Run Events and Stage Timeline
 
 Run events are a user-facing execution timeline for `InvestigationRun`. They
-are separate from raw agent/debug logs and avoid exposing internal graph node
+are separate from raw agent diagnostic logs and avoid exposing internal graph node
 names.
 
 Event types are:
@@ -430,15 +487,85 @@ Current pages:
 - `/investigations/[id]`
 - `/data-sources`
 - `/data-sources/[id]`
+- `/reports`
+- `/reports/[id]`
 - `/published-reports`
+- `/published-reports/[id]`
 
-The Investigation detail page is the first Decision Workspace prototype. It
-shows Investigation status, linked data sources, backend runs, findings,
-artifacts, and a polling timeline backed by:
+The frontend now uses a unified application shell with a persistent sidebar,
+top breadcrumb header, active navigation states, recent investigations, and a
+theme toggle. The theme system supports `system`, `light`, and `dark`
+preferences, stores the preference in `localStorage`, and keeps the report
+reader, workspace cards, timelines, forms, and editors readable in both themes.
+
+Lifecycle actions use soft archive flows rather than hard deletion:
+
+- Investigations can be archived from their detail page.
+- Data sources can be archived from their detail page.
+- Draft ShareableReports can be archived from their report page.
+
+Each destructive lifecycle action is guarded by a confirmation modal. Final
+snapshots remain immutable and are not deleted by these archive actions.
+
+## Next.js Investigation Workspace
+
+The Investigation detail page is now the main analytical workspace. It is not a
+chat page; conversation is only one interaction layer inside the broader
+Investigation object.
+
+The page is organized around:
+
+- a top Investigation header with the current question, status, linked data
+  source count, and latest run state;
+- a main Investigation canvas for findings, artifacts, and report path
+  summaries;
+- a sticky side panel with linked data context, follow-up conversation, run
+  controls, run history, and selected run timeline.
+
+Data context cards show source name, profile shape, inferred or semantic key
+columns, caveats, and links back to Data Source detail pages. This keeps the
+agent output grounded in the underlying dataset.
+
+Run timeline remains polling-based and uses:
 
 ```text
 GET /investigation-runs/{run_id}/events?after=<cursor>&limit=100
 ```
+
+This makes execution understandable without exposing raw graph internals.
+Reports and final deliverables remain downstream outputs after findings and
+artifacts are reviewed.
+
+## Report actions in Investigation Workspace
+
+The Next.js Investigation Workspace now exposes report lifecycle actions
+directly from the Investigation canvas:
+
+```text
+Run analysis
+  -> review findings/artifacts
+  -> create ShareableReport
+  -> view draft report
+  -> finalize into FinalReportSnapshot
+  -> open final report reader
+```
+
+The frontend uses these API routes:
+
+- `GET /investigations/{id}/reports`
+- `POST /investigations/{id}/reports`
+- `GET /reports/{id}`
+- `GET /reports/{id}/readiness`
+- `POST /reports/{id}/finalize`
+- `GET /reports/{id}/final-snapshots`
+
+The report actions card lets users choose a template, include or exclude
+technical appendix content, create a draft ShareableReport, open the readable
+draft report page, and create a final snapshot when the report is ready.
+
+Final snapshots are linked from the Reports workflow, so the Investigation
+Workspace remains the working area while exported reports remain the deliverable
+view.
 
 Run the backend:
 
@@ -558,6 +685,27 @@ passed directly, the run service loads the dataframe from `DataSource.location`
 and passes it into the existing agent runner. Older dataframe-only flows and
 Streamlit uploads remain supported.
 
+## Archive vs Delete
+
+Archive is the soft lifecycle action. Archived investigations, data sources,
+and draft reports remain available for history and can still preserve links
+from existing work.
+
+Delete is permanent. It is exposed as a destructive action with confirmation
+in the Next.js UI:
+
+- deleting an investigation removes the investigation, runs, run events,
+  messages, findings, artifacts, reports, final snapshots, comments, memory
+  items, and related execution history;
+- deleting a data source removes the source, profile, semantic notes, and
+  references from investigations;
+- if the data source is an uploaded CSV stored under `.analytica/uploads/`,
+  the local file is deleted as well.
+
+The file deletion path is guarded: the backend only removes files that resolve
+inside the managed `.analytica/uploads/` directory. External paths are never
+unlinked by the data source delete flow.
+
 ## Persistent product layer
 
 Investigations now persist between app restarts. The default database path is:
@@ -594,7 +742,7 @@ time.
 
 The Streamlit workspace shows user-facing artifacts by default. Technical
 artifacts stay behind an explicit toggle so the main report does not feel like a
-debug console.
+diagnostic console.
 
 ### Review lifecycle
 
@@ -618,9 +766,10 @@ objects live in `source/product/*`, not in Streamlit session state. The next
 frontend can reuse the same store/service concepts while adding better
 navigation, collaboration, report editing, and artifact layout.
 
-## Exporting investigations
+## Exporting investigations and reports
 
-The workspace can export an Investigation as Markdown or HTML.
+The workspace can export an Investigation or ShareableReport as TXT, Markdown,
+or HTML.
 
 The default export is a clean business report:
 
@@ -629,6 +778,17 @@ The default export is a clean business report:
 - accepted findings first, then proposed findings
 - user-facing artifacts
 - pinned artifacts before unpinned artifacts
+
+TXT is the simplest human-readable format. It uses plain headings, readable
+metadata, and numbered or spaced sections without raw JSON.
+
+Markdown is intended for editable/shareable report workflows. It uses a title,
+metadata table, section headings, findings, and readable artifact summaries.
+
+HTML is a print-friendly polished report with embedded CSS, readable max width,
+metadata badges, section spacing, styled tables, and escaped user content. A PDF
+route is intentionally not added yet; users can open the HTML export and use the
+browser's Print / Save as PDF flow without adding a heavy PDF dependency.
 
 Technical artifacts such as generated Python, SQL, validation, and trace are not
 included by default. The user must explicitly enable the technical appendix in
@@ -641,6 +801,10 @@ Export functions live in `source/product/exporter.py`:
 ```python
 export_investigation_markdown(investigation, include_technical=False)
 export_investigation_html(investigation, include_technical=False)
+export_shareable_report_txt(report)
+export_shareable_report_markdown(report)
+export_shareable_report_html(report)
+export_final_report_snapshot_txt(snapshot)
 build_artifact_summary(investigation, include_technical=False)
 ```
 
@@ -723,6 +887,103 @@ The report editing service supports:
 Any user edit marks the section as `edited_by_user=True`, increments the
 section version, updates timestamps, and records a lightweight edit history
 entry. This keeps the data model simple while making human edits explicit.
+
+## Draft report editing in Next.js
+
+The Next.js draft report page at `/reports/[id]` now supports lightweight
+human-in-the-loop editing without a rich-text editor.
+
+The page has a simple `Preview / Edit` toggle. In edit mode a user can:
+
+- edit section titles;
+- edit section content in plain text areas;
+- add a new section;
+- duplicate a section;
+- delete a section;
+- move sections up or down.
+
+The frontend calls thin FastAPI routes over `ReportEditingService`:
+
+- `PATCH /reports/{id}/sections/{section_id}`
+- `POST /reports/{id}/sections`
+- `DELETE /reports/{id}/sections/{section_id}`
+- `POST /reports/{id}/sections/{section_id}/duplicate`
+- `POST /reports/{id}/sections/reorder`
+
+The backend keeps the existing report versioning behavior: each edit creates a
+new ShareableReport version snapshot and marks edited title/content sections
+back to draft review status. The readiness panel on the report page refreshes
+after edits through the Next.js server render path.
+
+Final snapshots remain immutable. Editing a draft report after finalization does
+not mutate already-published final deliverables.
+
+## Section-level report review in Next.js
+
+The Next.js draft report page also supports lightweight section review controls.
+Each section shows its review status and can be marked:
+
+- `approved`
+- `changes_requested`
+
+The UI calls the existing backend review routes:
+
+- `POST /reports/{id}/sections/{section_id}/approve`
+- `POST /reports/{id}/sections/{section_id}/request-changes`
+
+Editing title or content returns a section to draft status through the existing
+backend behavior. Review actions create a new report version snapshot and the
+report page refreshes, so readiness counts and blocking checks update after the
+change.
+
+The readiness panel shows whether the report is ready, plus blocking checks and
+warnings. Finalization still follows backend rules: reports with blocking
+readiness issues cannot be finalized unless the user explicitly uses the force
+option. This is lightweight review, not full collaboration.
+
+## Section comments in report review
+
+The Next.js draft report page now shows review comments under each report
+section. Comments are lightweight annotations scoped to a section, not realtime
+collaboration threads.
+
+Reviewers can:
+
+- add a comment explaining what should be clarified;
+- request changes with an optional reason, which creates a section comment;
+- resolve open comments after edits are made;
+- delete comments when they are no longer useful.
+
+Open comments are included in report readiness checks and block finalization by
+default. Resolved comments remain visible in the section history when the user
+chooses to show them. The API routes are:
+
+- `GET /reports/{id}/comments`
+- `POST /reports/{id}/comments`
+- `POST /reports/{id}/comments/{comment_id}/resolve`
+- `DELETE /reports/{id}/comments/{comment_id}`
+
+## Report review summary
+
+The Next.js draft report page includes a `Report Review` summary in the right
+sidebar. It gives reviewers an at-a-glance view of:
+
+- total sections;
+- approved sections;
+- draft / needs-review sections;
+- sections with requested changes;
+- open and resolved comments;
+- blocking readiness checks;
+- warning checks.
+
+The summary derives its counts from the current `ShareableReport`, section
+comments, and readiness result. It also shows an overall state such as
+`Ready to finalize`, `Needs attention`, `Changes requested`, or `Draft`.
+
+When possible, the panel links to the first section with open comments or
+requested changes. This keeps finalization grounded in lightweight review state:
+open comments and blocking readiness issues should be resolved before creating
+an immutable final snapshot.
 
 ## Human-in-the-loop workflow
 
@@ -849,6 +1110,7 @@ snapshot of the report at the moment of final export. It stores:
 - status
 - Markdown content
 - HTML content
+- TXT content
 - readiness snapshot
 - approval status
 - approved_at / approved_by
@@ -868,48 +1130,25 @@ Revoked snapshots stay stored for auditability. This is lightweight publishing,
 not enterprise compliance: there are still no users, auth, legal hold, or formal
 policy engine.
 
-## Published reports library
+## Final report snapshots
 
-The Published Reports Library is the product-level list of final deliverables.
-It is separate from an individual Investigation workspace.
+Final deliverables are backed by immutable `FinalReportSnapshot` records. A
+snapshot stores the report title, source Investigation, finalized report
+version, approval metadata, readiness snapshot, Markdown content, and HTML
+content as they existed at finalization time.
 
-The library is backed by immutable `FinalReportSnapshot` records. It shows what
-has been published, when it was published, which Investigation it came from,
-which report version was finalized, whether the snapshot is still final or has
-been revoked, and whether the readiness snapshot passed when it was created.
+Downloads never regenerate finalized report content. They use the stored
+snapshot payload, so final deliverables remain stable even when the source
+ShareableReport changes later.
 
-The Streamlit page lives at:
-
-```text
-pages/Published_Reports.py
-```
-
-The page supports:
-
-- search by report title or Investigation title
-- search by tags, owner, audience, business area, short description, and
-  decision status
-- status filtering for `all`, `final`, and `revoked`
-- decision status, business area, and tag filtering
-- optional Investigation filtering
-- Markdown and HTML downloads from stored snapshot content
-- snapshot revoke actions
-- detail expanders with approval metadata, readiness summary, report version,
-  and snapshot id
-- metadata editing for the decision library
-
-Downloads never regenerate report content. They use `markdown_content` and
-`html_content` stored on the snapshot, so final deliverables remain stable even
-when the source ShareableReport changes later.
-
-Revoked snapshots remain visible. This keeps the library auditable without
-turning it into a heavy compliance system.
+Revoked snapshots remain stored for auditability. This keeps finalization
+traceable without adding a separate publishing UI.
 
 ## Decision library metadata
 
 Final report content is immutable, but decision metadata is editable. This lets
-the Published Reports Library become a searchable decision library instead of a
-flat list of exported files.
+report exports carry searchable decision context instead of becoming a flat file
+dump.
 
 Decision metadata fields:
 
@@ -963,6 +1202,8 @@ Current routes:
 - `GET /investigations`
 - `POST /investigations`
 - `GET /investigations/{id}`
+- `POST /investigations/{id}/messages`
+- `GET /investigations/{id}/messages`
 - `POST /investigations/{id}/run`
 - `GET /investigations/{id}/runs`
 - `GET /investigations/{id}/events`
@@ -983,6 +1224,7 @@ Current routes:
 - `POST /reports/final-snapshots/{snapshot_id}/revoke`
 - `GET /final-reports`
 - `GET /final-reports/{snapshot_id}`
+- `GET /final-reports/{snapshot_id}/download/txt`
 - `GET /final-reports/{snapshot_id}/download/markdown`
 - `GET /final-reports/{snapshot_id}/download/html`
 - `POST /final-reports/{snapshot_id}/revoke`
@@ -1041,6 +1283,10 @@ Migration v9 adds `data_source_semantic_notes` for human-written source and
 column semantics.
 Migration v10 adds `investigation_runs` for API-driven execution state.
 Migration v11 adds `investigation_run_events` for the user-facing run timeline.
+Migration v12 adds `investigation_messages` for follow-up questions and
+assistant run summaries inside an Investigation.
+Migration v13 adds `txt_content` to final report snapshots so plain-text final
+deliverables are immutable like Markdown and HTML.
 Migrations are written to be safe for existing local databases, so reopening an
 existing `.analytica/investigations.sqlite` file does not fail.
 
@@ -1048,9 +1294,370 @@ Future schema changes should be added as new ordered entries in
 `source/product/migrations.py`. Keep migrations small, explicit, and safe to run
 against an existing `.analytica/investigations.sqlite` file.
 
+## Investigation conversation and follow-ups
+
+An Investigation is now an iterative workspace rather than a single prompt.
+The primary product objects remain runs, artifacts, findings, reports, and final
+deliverables, but the workspace can also store a compact conversation thread.
+
+`InvestigationMessage` records:
+
+- user follow-up questions;
+- assistant analytical answers or compact summaries;
+- notes or errors when needed;
+- optional `run_id` links when a message is produced by a run.
+
+Follow-up flow:
+
+```text
+user adds InvestigationMessage
+  -> POST /investigations/{id}/run with message_id
+  -> InvestigationRunService builds compact context
+  -> agent runs with the follow-up as active question
+  -> artifacts/findings/report update the Investigation
+  -> assistant answer/summary message is added for the conversation
+```
+
+The run context includes the active follow-up, recent messages, linked data
+source usage context, previous findings, artifact titles, and the latest report
+summary. It intentionally avoids dumping full raw artifacts or every historical
+message into the prompt.
+
+API endpoints:
+
+- `POST /investigations/{id}/messages`
+- `GET /investigations/{id}/messages`
+- `POST /investigations/{id}/run` with optional `message_id`
+
+This is not a chat-only product model. Conversation is one interaction layer
+inside the Investigation Workspace; reviewed artifacts and reports remain the
+main durable outputs.
+
+## Investigation memory and suggested questions
+
+Investigations now keep lightweight structured memory alongside runs, messages,
+artifacts, findings, and reports. Memory items are persisted through the
+product store and linked to one Investigation.
+
+Memory types:
+
+- assumptions;
+- open questions;
+- decisions;
+- risks;
+- milestones.
+
+Each memory item stores content, status, timestamps, and metadata. The Next.js
+Investigation Workspace shows an `Investigation Memory` panel where users can
+add items and mark them resolved or archived. This gives follow-up runs durable
+context without turning the workspace into a generic chat transcript.
+
+Suggested questions are generated deterministically from data-source profile,
+usage context, semantic notes, inferred column roles, numeric metrics,
+categorical dimensions, timestamp columns, missingness, and existing findings.
+The suggestions remain dataset-agnostic: they never assume fixed business
+columns such as revenue, sales, customers, or regions unless those meanings are
+provided through semantic notes.
+
+API endpoints:
+
+- `GET /investigations/{id}/memory`
+- `POST /investigations/{id}/memory`
+- `PATCH /investigations/{id}/memory/{memory_id}`
+- `GET /investigations/{id}/suggested-questions`
+- `GET /data-sources/{id}/suggested-questions`
+
+The Next.js workspace renders suggestion cards with a `Use as investigation
+question` action. That action creates a follow-up message and starts a new run
+with the linked data sources, preserving the product loop:
+
+```text
+data context -> suggested question -> follow-up run -> findings/artifacts -> memory/report updates
+```
+
+## Final report preview in Next.js
+
+The Next.js Reports workspace opens report drafts and finalized snapshots in a
+document-style preview. The preview displays:
+
+- report status and decision metadata;
+- approval metadata;
+- readiness summary;
+- source report version;
+- export actions.
+
+The Reports page remains the user-facing home for report drafts and final
+deliverables.
+
+## Final report reader mode
+
+The final report detail page is a lightweight reader mode. The main canvas is
+reserved for the document preview, while a sticky sidebar keeps the report
+state visible:
+
+- final/revoked status;
+- decision status, owner, audience, business area, tags, and decision date;
+- approval metadata;
+- readiness counts;
+- report version and snapshot id;
+- download and print actions.
+
+The preview supports HTML, Markdown, and TXT modes. HTML is rendered inside an
+isolated preview frame. Markdown and TXT use readable text containers, and
+Markdown headings provide a small section outline without adding a markdown
+parser dependency.
+
+The print layout hides navigation, metadata panels, and actions so browser
+printing focuses on the report content. Downloads still use immutable
+`FinalReportSnapshot` content rather than regenerating the document.
+
+Downloads use the stored final snapshot content:
+
+- TXT for simple readable plain-text sharing;
+- Markdown for editable text workflows;
+- HTML for polished browser viewing and printing.
+
+Backend PDF export is intentionally skipped for now. The HTML export is
+print-friendly, and the Next.js detail page includes a `Print / Save PDF`
+action that uses the browser print dialog.
+
+## Promote to memory and evidence linking
+
+Investigation Memory can now be populated from existing analytical work, not
+only from manual notes. This keeps the workspace self-organizing while
+preserving source references.
+
+Supported promotion flows:
+
+- finding -> assumption;
+- finding -> risk;
+- finding -> decision;
+- report comment -> open question;
+- report section -> decision.
+
+Promoted memory items store origin metadata such as `source_type`,
+`source_id`, `promoted_from`, and `promoted_at`. The source content is copied
+into memory, while the original finding, comment, or report section remains
+unchanged.
+
+Findings also support lightweight evidence references. A finding can link to:
+
+- artifacts;
+- data sources;
+- memory items;
+- report sections through the API model.
+
+Evidence links are stored as compact metadata on the finding. This is
+intentionally not a graph database: it is a small reference layer that helps a
+reviewer understand what supports a finding and navigate back to the relevant
+workspace object.
+
+The Next.js Investigation Workspace includes an Evidence Inspector. Clicking a
+linked evidence chip opens a side panel instead of navigating away. The
+inspector previews the referenced object when it is already available in the
+workspace:
+
+- artifact title, type, visibility, and compact content preview;
+- data source status, row/column summary, caveats, and link to source detail;
+- memory item type, status, content, timestamps, and origin metadata;
+- report section title, review status, content preview, and link to report.
+
+This keeps traceability lightweight and readable. It is not a graph database or
+a lineage visualization system.
+
+## User-facing display layer
+
+The product can store technical metadata, raw payload previews, generated SQL,
+Python code, validation output, and run identifiers. Those details are useful
+for diagnostics and audit, but they should not dominate the main Investigation
+Workspace.
+
+The Next.js workspace uses a display layer that turns raw analytical payloads
+into readable summaries:
+
+- key findings show short explanations instead of raw dictionary/dataframe/SQL
+  previews;
+- visual analysis highlights charts and report-ready outputs first, with generated
+  code, SQL, validation, and traces collapsed under advanced details;
+- conversation messages use simple `You` and `Analytica` labels instead of
+  internal message types and run ids;
+- data context cards show dataset name, shape, key columns, and caveats without
+  long inferred-role dumps;
+- suggested questions are deduplicated, shortened, and limited so the workspace
+  stays readable.
+
+Main UI is for business/user-facing interpretation. Technical UI remains
+available through collapsed advanced sections when a reviewer needs
+to inspect run ids, raw payloads, SQL, code, trace, or validation internals.
+
+## Conversational Workspace Layout
+
+The Next.js Investigation detail page now uses a center-first conversational
+workspace:
+
+```text
+Key findings rail | Main chat workspace | Dataset rail
+```
+
+The main column is the primary user experience. It contains only the
+conversation: user questions, follow-up questions, assistant answers, and
+clear analytical answers. Findings are intentionally not rendered as cards
+inside the chat. Assistant messages can point the user to key findings or
+visual analysis, but the chat remains a readable dialogue rather than a mixed
+object feed.
+
+The left rail is compact analytical output:
+
+- key findings;
+- visual analysis with chart previews;
+- analyst notes only when useful;
+- report actions and final deliverable links.
+
+Finding actions also live in this rail. Users can expand a compact finding to
+view details, inspect evidence, or use it as report
+material without interrupting the central conversation.
+
+The right rail contains supporting context:
+
+- dataset overview;
+- suggested next analyses;
+- latest chart or report;
+- a simple Analyze action with advanced settings collapsed.
+
+Backend stages, polling, run identifiers, validation traces, and diagnostic payloads
+do not appear in the default workspace.
+
+## Conversation vs Findings separation
+
+The Investigation Workspace follows a strict separation:
+
+- Center chat: user questions and assistant answers only.
+- Left rail: key findings, visual analysis, analyst notes when present, report
+  actions, and evidence controls.
+- Right rail: dataset overview, suggested next analyses, latest output, and a
+  simple Analyze action.
+
+This keeps the product understandable for non-technical users. A failed run is
+shown in the chat as a plain assistant error with a useful reason, while raw
+stack traces, run ids, SQL, code, and payload metadata stay in collapsed
+advanced sections.
+
+The layout is responsive: desktop uses three columns, while smaller screens put
+the chat first and stack the knowledge/context rails below it. Lightweight toast
+notifications give feedback for actions such as starting analysis, finishing
+analysis, archiving, deleting, and other confirmed operations.
+
+## Analytical continuity positioning
+
+Analytica is positioned as an AI analytical investigation agent, not a generic
+chat-with-CSV interface. Follow-up questions are treated as continuations of an
+ongoing investigation, but the assistant must not describe that machinery to the
+user. The backend prompt now explicitly tells the agent to:
+
+- answer the current question first;
+- avoid replaying the dataset overview unless asked;
+- resolve references such as "this", "that", or "the chart" from recent context;
+- use prior conversation, saved insights, outputs, reports, and research notes
+  only when they help the current analytical question;
+- never explain orchestration, memory, context handling, run lifecycle, backend
+  workflow, or prompt mechanics in a user-facing answer.
+
+When the raw CSV is not available to the runtime, deterministic fallbacks also
+prefer continuity: questions about evidence review use current insights, and
+other follow-ups produce an analyst-facing answer instead of repeating schema
+profiling or explaining the continuation mechanism.
+
+Analytica should sound like a senior data analyst. Good answers include
+comparisons, rankings, anomalies, caveats, chart suggestions, and concrete next
+analytical actions. Bad answers narrate workflow mechanics such as "I treated
+this as a continuation" or "I used prior context."
+
+The deterministic fallback layer now covers common analytical intents when the
+LLM or tool path fails:
+
+- numeric metric by categorical group;
+- outlier detection;
+- data quality checks for missing values and duplicates;
+- correlations between numeric fields;
+- time trends when a date-like column exists;
+- chart requests using the best available metric and time/group column;
+- evidence review for weak insights.
+
+User-facing language now emphasizes analyst outcomes:
+
+- "Findings" are presented as key findings.
+- "Artifacts" are presented as visual analysis.
+- Notes are shown as analyst notes only when useful.
+- Dataset upload is the primary flow; metadata-only dataset setup is advanced.
+- Run, timeline, lifecycle, and orchestration language is hidden from the
+  primary workspace.
+
+The product should expose analytical thinking, conclusions, charts, trust, and
+report-ready narrative. Internal execution concepts remain available only as
+advanced details.
+
+API endpoints:
+
+- `POST /investigations/{id}/findings/{finding_id}/promote-memory`
+- `POST /investigations/{id}/findings/{finding_id}/evidence`
+- `POST /reports/{report_id}/comments/{comment_id}/promote-memory`
+- `POST /reports/{report_id}/sections/{section_id}/promote-memory`
+
+## Organizational analytical workflows
+
+Analytica now includes a lightweight organizational guidance layer. It is not a
+task-management or approval system; it gives analysts reusable investigation
+standards without forcing rigid process.
+
+The backend models:
+
+- organizational workflows, made of stages and expectations;
+- validation expectations and evidence requirements;
+- lightweight investigation review feedback;
+- organizational playbooks derived from reusable analytical patterns;
+- report standards for executive briefs, decision memos, and technical
+  appendices.
+
+The guidance stays dataset-agnostic. It works from semantic analysis types,
+artifacts, evidence strength, and reusable cross-investigation patterns rather
+than specific column names or sample datasets. For example, a grouped metric
+finding should have chart/table evidence, anomaly claims should include
+magnitude or validation guidance, and correlation findings should avoid causal
+overclaiming.
+
+The Next.js workspace shows this as compact analytical guidance in the right
+rail: suggested workflow, evidence quality, next review checkpoint, and a small
+number of validation hints. This is progressive guidance for analysts, not
+enterprise workflow bureaucracy.
+
+API endpoint:
+
+- `GET /investigations/{id}/workflow-guidance`
+
+## Workspace dashboard
+
+The Next.js home page is now an analytical dashboard instead of a redirect.
+It gives a product-level overview of the workspace:
+
+- recent investigations;
+- investigations needing attention;
+- active risks from Investigation Memory;
+- pending report reviews;
+- recent uploaded datasets;
+- latest finalized reports;
+- suggested next actions.
+
+The dashboard is assembled from existing API resources, so it does not add a
+new orchestration layer. It reinforces the product model:
+
+```text
+datasets -> investigations -> memory/runs/evidence -> reports -> final deliverables
+```
+
 ## Next steps
 
-- Replace the Streamlit shell with a dedicated web app Investigation Workspace.
+- Continue polishing the Next.js Investigation Workspace while keeping Streamlit
+  as a reference/demo client.
 - Add richer report export templates and move from SQLite to Postgres when collaboration requires it.
 - Add artifact files/object storage for charts, tables, and exported reports.
 - Add real users, auth, section ownership, and collaborative review once the

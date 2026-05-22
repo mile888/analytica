@@ -71,7 +71,6 @@ def resolve_api_key(cfg: LLMConfig, provider_name: Optional[str] = None) -> str:
     if value:
         return value
 
-    # Deep Agents docs use provider-standard environment variable names.
     fallback_envs = {
         "gemini": ("GOOGLE_API_KEY",),
         "openai": ("OPENAI_API_KEY",),

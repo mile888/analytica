@@ -36,15 +36,22 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def env_list(name: str, default: str = "") -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 def resolve_project_path(value: str | Path, *, base: Path = PROJECT_ROOT) -> Path:
     """Resolve user/config paths without baking absolute local paths into the app."""
     path = Path(value).expanduser()
     return path if path.is_absolute() else base / path
 
 
-DEFAULT_DATA_PATH = PROJECT_ROOT / env_str("ANALYTICA_DEFAULT_DATA_PATH", "data/train.csv")
+DEFAULT_DATA_PATH = resolve_project_path(env_str("ANALYTICA_DEFAULT_DATA_PATH", "data"))
 SKILL_DIR = PROJECT_ROOT / env_str("ANALYTICA_SKILL_DIR", "source/skills")
 ARTIFACT_DIR = PROJECT_ROOT / env_str("ANALYTICA_ARTIFACT_DIR", "artifacts")
+RUNTIME_DIR = Path(env_str("ANALYTICA_RUNTIME_DIR", ".analytica/runtime"))
+UPLOAD_DIR = Path(env_str("ANALYTICA_UPLOAD_DIR", ".analytica/uploads"))
 DEEPAGENTS_MEMORY_DIR = resolve_project_path(env_str("ANALYTICA_DEEPAGENTS_MEMORY_DIR", ".analytica/memory"))
 DEEPAGENTS_MEMORY_FILE = env_str("ANALYTICA_DEEPAGENTS_MEMORY_FILE", "/memories/AGENTS.md")
 MPLCONFIGDIR = Path(env_str("ANALYTICA_MPLCONFIGDIR", "/tmp/analytica-matplotlib"))
@@ -54,6 +61,7 @@ OPENROUTER_BASE_URL = env_str("OPENROUTER_BASE_URL", "https://openrouter.ai/api/
 OLLAMA_BASE_URL = env_str("OLLAMA_BASE_URL", "http://localhost:11434")
 ANALYTICA_HTTP_REFERER = env_str("ANALYTICA_HTTP_REFERER", "http://localhost:8501")
 ANALYTICA_APP_TITLE = env_str("ANALYTICA_APP_TITLE", "Analytica")
+CORS_ORIGINS = env_list("ANALYTICA_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
 
 THREAD_PREFIX = env_str("ANALYTICA_THREAD_PREFIX", "analytica")
 ANALYTICA_THREAD_ID = env_str("ANALYTICA_THREAD_ID", "")

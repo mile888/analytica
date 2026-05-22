@@ -4,8 +4,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 import { createDataSource } from "@/lib/api";
-import { parseTags } from "@/lib/forms";
-import { Card } from "@/components/ui";
 
 const sourceTypes = ["csv", "sqlite", "postgres", "duckdb", "unknown"] as const;
 
@@ -24,8 +22,7 @@ export function CreateDataSourceForm() {
         name: String(formData.get("name") || ""),
         type: String(formData.get("type") || "unknown") as (typeof sourceTypes)[number],
         location: String(formData.get("location") || "") || null,
-        description: String(formData.get("description") || "") || null,
-        tags: parseTags(String(formData.get("tags") || ""))
+        description: String(formData.get("description") || "") || null
       });
       setCreatedId(created.data_source_id);
       router.refresh();
@@ -42,9 +39,13 @@ export function CreateDataSourceForm() {
   }
 
   return (
-    <Card>
-      <h2 className="text-sm font-semibold text-slate-950">Create data source</h2>
-      <p className="mt-1 text-xs text-slate-500">Metadata-only creation. CSV upload stays in Streamlit for now.</p>
+    <details className="rounded-2xl border border-slate-200/80 bg-white/90 p-5 shadow-sm shadow-slate-200/60 dark:border-slate-800 dark:bg-slate-950/85 dark:shadow-black/20">
+      <summary className="cursor-pointer text-sm font-semibold text-slate-950 dark:text-slate-50">
+        Advanced: create a metadata-only dataset
+      </summary>
+      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+        Use this only when the data lives elsewhere. The primary flow is CSV upload above.
+      </p>
       <form onSubmit={onSubmit} className="mt-4 grid gap-3">
         <input name="name" required placeholder="Name" className="rounded-md border border-slate-300 px-3 py-2 text-sm" />
         <select name="type" defaultValue="csv" className="rounded-md border border-slate-300 px-3 py-2 text-sm">
@@ -52,7 +53,6 @@ export function CreateDataSourceForm() {
         </select>
         <input name="location" placeholder="Location or connection reference" className="rounded-md border border-slate-300 px-3 py-2 text-sm" />
         <textarea name="description" placeholder="Description" rows={3} className="rounded-md border border-slate-300 px-3 py-2 text-sm" />
-        <input name="tags" placeholder="Tags, comma-separated" className="rounded-md border border-slate-300 px-3 py-2 text-sm" />
         <button disabled={isSubmitting} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-400">
           {isSubmitting ? "Creating..." : "Create source"}
         </button>
@@ -60,9 +60,9 @@ export function CreateDataSourceForm() {
       {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
       {createdId ? (
         <p className="mt-3 text-sm text-emerald-700">
-          Created. <Link className="underline" href={`/data-sources/${createdId}`}>Open data source</Link>
+          Created. <Link className="underline" href={`/data-sources/${createdId}`}>Open dataset</Link>
         </p>
       ) : null}
-    </Card>
+    </details>
   );
 }

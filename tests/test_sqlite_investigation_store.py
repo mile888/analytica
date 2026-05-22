@@ -12,6 +12,9 @@ from source.product.investigation import (
     Finding,
     FindingStatus,
     InvestigationRun,
+    InvestigationMemoryItem,
+    InvestigationMemoryStatus,
+    InvestigationMemoryType,
     InvestigationStatus,
 )
 from source.product.sqlite_store import SQLiteInvestigationStore
@@ -29,7 +32,7 @@ def test_sqlite_store_creates_db_and_tables(tmp_path: Path) -> None:
 def test_sqlite_create_list_get_persists_after_new_store_instance(tmp_path: Path) -> None:
     db_path = tmp_path / "investigations.sqlite"
     store = SQLiteInvestigationStore(db_path)
-    investigation = store.create_investigation("Как режим доставки связан с объемом продаж?")
+    investigation = store.create_investigation("Какие группы отличаются по выбранной метрике?")
     store.update_status(investigation.investigation_id, InvestigationStatus.NEEDS_REVIEW)
 
     reloaded_store = SQLiteInvestigationStore(db_path)
@@ -150,7 +153,7 @@ def test_sqlite_store_creates_schema_migrations(tmp_path: Path) -> None:
         ).fetchone()
 
     assert row is not None
-    assert store.get_schema_version() == 11
+    assert store.get_schema_version() == 14
 
 
 def test_reopening_old_db_without_migration_table_does_not_fail(tmp_path: Path) -> None:
@@ -173,6 +176,77 @@ def test_reopening_old_db_without_migration_table_does_not_fail(tmp_path: Path) 
 
     store = SQLiteInvestigationStore(db_path)
 
-    assert store.get_schema_version() == 11
+    assert store.get_schema_version() == 14
     investigation = store.create_investigation("Question")
     assert store.get_investigation(investigation.investigation_id).user_question == "Question"
+
+
+def test_sqlite_txt_content_migration_is_idempotent_for_partially_updated_db(tmp_path: Path) -> None:
+    db_path = tmp_path / "partial.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        for version in range(1, 13):
+            conn.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+                (version, f"migration_{version}", "2026-01-01T00:00:00"),
+            )
+        conn.execute(
+            """
+            CREATE TABLE final_report_snapshots (
+                id TEXT PRIMARY KEY,
+                report_id TEXT NOT NULL,
+                investigation_id TEXT NOT NULL,
+                report_version INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                status TEXT NOT NULL,
+                markdown_content TEXT NOT NULL,
+                html_content TEXT NOT NULL,
+                txt_content TEXT NOT NULL DEFAULT '',
+                readiness_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                approval_status TEXT NOT NULL,
+                approved_at TEXT,
+                approved_by TEXT,
+                source_report_json TEXT NOT NULL DEFAULT '{}',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                decision_metadata_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+
+    store = SQLiteInvestigationStore(db_path)
+
+    assert store.get_schema_version() == 14
+    with sqlite3.connect(db_path) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(final_report_snapshots)").fetchall()]
+    assert columns.count("txt_content") == 1
+
+
+def test_sqlite_investigation_memory_persists(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.sqlite"
+    store = SQLiteInvestigationStore(db_path)
+    investigation = store.create_investigation("Question")
+    item = InvestigationMemoryItem(
+        investigation_id=investigation.investigation_id,
+        memory_type=InvestigationMemoryType.OPEN_QUESTION,
+        content="Which pattern should be checked next?",
+    )
+    created = store.add_investigation_memory_item(item)
+    store.update_investigation_memory_item(created.memory_id, status=InvestigationMemoryStatus.RESOLVED)
+
+    reloaded = SQLiteInvestigationStore(db_path)
+    items = reloaded.list_investigation_memory(investigation.investigation_id)
+
+    assert reloaded.get_schema_version() == 14
+    assert len(items) == 1
+    assert items[0].content == "Which pattern should be checked next?"
+    assert items[0].status == InvestigationMemoryStatus.RESOLVED

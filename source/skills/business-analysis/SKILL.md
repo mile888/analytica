@@ -11,7 +11,7 @@ Use this skill for strategy, interpretation, metric design, hypotheses, decision
 ## Workflow
 1. Identify the business goal and decision context.
 2. Separate facts from assumptions.
-3. Suggest useful metrics, segments, and validation checks.
+3. Suggest useful metrics, comparison groups, and validation checks.
 4. Keep recommendations practical and concise.
 5. If the user asks for dataset-backed numbers, switch to `data-analysis` or `csv-dataframe-analysis`.
 

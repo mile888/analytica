@@ -10,9 +10,14 @@ from source.product.investigation import (
     Finding,
     FindingStatus,
     Investigation,
+    InvestigationMessage,
+    InvestigationMemoryItem,
+    InvestigationMemoryStatus,
+    InvestigationMemoryType,
+    InvestigationMessageRole,
+    InvestigationMessageType,
     InvestigationRun,
     InvestigationRunEvent,
-    InvestigationRunStage,
     InvestigationRunStatus,
     InvestigationStatus,
     ReportApprovalStatus,
@@ -30,6 +35,7 @@ from source.product.data_sources import (
     DataSourceSemanticNotes,
     DataSourceStatus,
 )
+from source.product.file_storage import delete_uploaded_file_if_safe
 
 
 class InvestigationStore:
@@ -47,6 +53,8 @@ class InvestigationStore:
         self._final_report_snapshots: dict[str, FinalReportSnapshot] = {}
         self._investigation_runs: dict[str, InvestigationRun] = {}
         self._investigation_run_events: dict[str, InvestigationRunEvent] = {}
+        self._investigation_messages: dict[str, InvestigationMessage] = {}
+        self._investigation_memory: dict[str, InvestigationMemoryItem] = {}
         self._data_sources: dict[str, DataSource] = {}
         self._data_source_profiles: dict[str, DataSourceProfile] = {}
         self._data_source_semantic_notes: dict[str, DataSourceSemanticNotes] = {}
@@ -84,6 +92,57 @@ class InvestigationStore:
         investigation.status = InvestigationStatus(status)
         self._touch(investigation)
         return investigation
+
+    def update_investigation_metadata(self, investigation_id: str, metadata: dict) -> Investigation:
+        investigation = self.get_investigation(investigation_id)
+        investigation.metadata = dict(metadata or {})
+        self._touch(investigation)
+        return investigation
+
+    def delete_investigation(self, investigation_id: str) -> None:
+        self.get_investigation(investigation_id)
+        report_ids = {
+            report.report_id
+            for report in self._shareable_reports.values()
+            if report.investigation_id == investigation_id
+        }
+        run_ids = {
+            run.run_id
+            for run in self._investigation_runs.values()
+            if run.investigation_id == investigation_id
+        }
+        for source in self._data_sources.values():
+            if investigation_id in source.linked_investigation_ids:
+                source.linked_investigation_ids = [
+                    item for item in source.linked_investigation_ids if item != investigation_id
+                ]
+                source.updated_at = utc_now()
+        self._report_comments = {
+            key: comment for key, comment in self._report_comments.items() if comment.report_id not in report_ids
+        }
+        self._final_report_snapshots = {
+            key: snapshot
+            for key, snapshot in self._final_report_snapshots.items()
+            if snapshot.investigation_id != investigation_id and snapshot.report_id not in report_ids
+        }
+        self._shareable_reports = {
+            key: report for key, report in self._shareable_reports.items() if report.investigation_id != investigation_id
+        }
+        self._investigation_run_events = {
+            key: event for key, event in self._investigation_run_events.items() if event.investigation_id != investigation_id
+        }
+        self._investigation_runs = {
+            key: run for key, run in self._investigation_runs.items() if run.investigation_id != investigation_id
+        }
+        self._investigation_messages = {
+            key: message
+            for key, message in self._investigation_messages.items()
+            if message.investigation_id != investigation_id and message.run_id not in run_ids
+        }
+        self._investigation_memory = {
+            key: item for key, item in self._investigation_memory.items() if item.investigation_id != investigation_id
+        }
+        del self._investigations[investigation_id]
 
     def create_investigation_run(self, run: InvestigationRun) -> InvestigationRun:
         self.get_investigation(run.investigation_id)
@@ -144,6 +203,88 @@ class InvestigationStore:
         )
         return events[-limit:]
 
+    def add_investigation_message(self, message: InvestigationMessage) -> InvestigationMessage:
+        self.get_investigation(message.investigation_id)
+        if message.run_id:
+            self.get_investigation_run(message.run_id)
+        message.role = InvestigationMessageRole(message.role)
+        message.message_type = InvestigationMessageType(message.message_type)
+        self._investigation_messages[message.message_id] = message
+        self._touch(self.get_investigation(message.investigation_id))
+        return message
+
+    def list_investigation_messages(
+        self,
+        investigation_id: str,
+        limit: int | None = None,
+    ) -> list[InvestigationMessage]:
+        self.get_investigation(investigation_id)
+        messages = sorted(
+            [
+                message
+                for message in self._investigation_messages.values()
+                if message.investigation_id == investigation_id
+            ],
+            key=lambda item: item.created_at,
+        )
+        return messages[-limit:] if limit else messages
+
+    def get_investigation_message(self, message_id: str) -> InvestigationMessage:
+        try:
+            return self._investigation_messages[message_id]
+        except KeyError as exc:
+            raise KeyError(f"InvestigationMessage not found: {message_id}") from exc
+
+    def add_investigation_memory_item(self, item: InvestigationMemoryItem) -> InvestigationMemoryItem:
+        self.get_investigation(item.investigation_id)
+        item.memory_type = InvestigationMemoryType(item.memory_type)
+        item.status = InvestigationMemoryStatus(item.status)
+        item.updated_at = utc_now()
+        self._investigation_memory[item.memory_id] = item
+        self._touch(self.get_investigation(item.investigation_id))
+        return item
+
+    def list_investigation_memory(
+        self,
+        investigation_id: str,
+        memory_type: InvestigationMemoryType | str | None = None,
+    ) -> list[InvestigationMemoryItem]:
+        self.get_investigation(investigation_id)
+        resolved_type = InvestigationMemoryType(memory_type) if memory_type else None
+        items = [item for item in self._investigation_memory.values() if item.investigation_id == investigation_id]
+        if resolved_type:
+            items = [item for item in items if item.memory_type == resolved_type]
+        return sorted(items, key=lambda item: item.updated_at, reverse=True)
+
+    def get_investigation_memory_item(self, memory_id: str) -> InvestigationMemoryItem:
+        try:
+            return self._investigation_memory[memory_id]
+        except KeyError as exc:
+            raise KeyError(f"InvestigationMemoryItem not found: {memory_id}") from exc
+
+    def update_investigation_memory_item(
+        self,
+        memory_id: str,
+        *,
+        content: str | None = None,
+        title: str | None = None,
+        status: InvestigationMemoryStatus | str | None = None,
+        metadata: dict | None = None,
+    ) -> InvestigationMemoryItem:
+        item = self.get_investigation_memory_item(memory_id)
+        if content is not None:
+            item.content = content
+        if title is not None:
+            item.title = title
+        if status is not None:
+            item.status = InvestigationMemoryStatus(status)
+        if metadata is not None:
+            item.metadata = metadata
+        item.updated_at = utc_now()
+        self._investigation_memory[memory_id] = item
+        self._touch(self.get_investigation(item.investigation_id))
+        return item
+
     def update_finding_status(
         self,
         investigation_id: str,
@@ -179,6 +320,21 @@ class InvestigationStore:
         for artifact in investigation.artifacts:
             if artifact.artifact_id == artifact_id:
                 artifact.visibility = resolved
+                self._touch(investigation)
+                return investigation
+        raise KeyError(f"Artifact not found: {artifact_id}")
+
+    def update_artifact_metadata(
+        self,
+        investigation_id: str,
+        artifact_id: str,
+        metadata: dict,
+    ) -> Investigation:
+        investigation = self.get_investigation(investigation_id)
+        for artifact in investigation.artifacts:
+            if artifact.artifact_id == artifact_id:
+                current = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+                artifact.metadata = {**current, **dict(metadata or {})}
                 self._touch(investigation)
                 return investigation
         raise KeyError(f"Artifact not found: {artifact_id}")
@@ -363,8 +519,59 @@ class InvestigationStore:
         data_source.status = DataSourceStatus.ARCHIVED
         return self.update_data_source(data_source)
 
+    def delete_data_source(self, data_source_id: str, delete_file: bool = True) -> bool:
+        data_source = self.get_data_source(data_source_id)
+        file_deleted = False
+        if delete_file and data_source.data_source_type == "csv":
+            file_deleted = delete_uploaded_file_if_safe(data_source.location)
+        for investigation in self._investigations.values():
+            investigation.linked_data_source_ids = [
+                item for item in investigation.linked_data_source_ids if item != data_source_id
+            ]
+            investigation.data_sources = [
+                item for item in investigation.data_sources if item != data_source_id
+            ]
+            self._touch(investigation)
+        self._data_source_profiles.pop(data_source_id, None)
+        self._data_source_semantic_notes.pop(data_source_id, None)
+        del self._data_sources[data_source_id]
+        return file_deleted
+
     def save_data_source_profile(self, data_source_id: str, profile: DataSourceProfile) -> DataSourceProfile:
-        self.get_data_source(data_source_id)
+        source = self.get_data_source(data_source_id)
+        runtime = source.metadata.get("execution_context") if isinstance(source.metadata, dict) else {}
+        if not isinstance(runtime, dict) or "executable_available" not in runtime:
+            source.metadata = dict(source.metadata or {})
+            source.metadata.setdefault("dataset_id", data_source_id)
+            source.metadata.setdefault("dataset_runtime_reference", "")
+            source.metadata.setdefault("executable_available", False)
+            source.metadata.setdefault("row_count", int(profile.row_count))
+            source.metadata.setdefault("storage_reference", "")
+            source.metadata.setdefault("created_at", source.created_at.isoformat())
+            source.metadata.setdefault("last_loaded_at", source.updated_at.isoformat())
+            source.metadata.setdefault(
+                "execution_context",
+                {
+                    "dataset_id": data_source_id,
+                    "dataset_runtime_reference": "",
+                    "schema_metadata": {
+                        "columns": [{"name": column.name, "dtype": column.dtype} for column in profile.columns],
+                        "row_count": int(profile.row_count),
+                        "column_count": int(profile.column_count),
+                    },
+                    "profile_metadata": {
+                        "row_count": int(profile.row_count),
+                        "column_count": int(profile.column_count),
+                        "generated_at": profile.generated_at.isoformat(),
+                    },
+                    "executable_available": False,
+                    "row_count": int(profile.row_count),
+                    "storage_reference": "",
+                    "created_at": source.created_at.isoformat(),
+                    "last_loaded_at": source.updated_at.isoformat(),
+                    "unavailable_reason": "profile_only",
+                },
+            )
         self._data_source_profiles[data_source_id] = profile
         return profile
 
@@ -443,6 +650,33 @@ class InvestigationStore:
         investigation.findings.append(finding)
         self._touch(investigation)
         return investigation
+
+    def update_finding(self, investigation_id: str, finding: Finding) -> Investigation:
+        investigation = self.get_investigation(investigation_id)
+        for idx, existing in enumerate(investigation.findings):
+            if existing.finding_id == finding.finding_id:
+                investigation.findings[idx] = finding
+                self._touch(investigation)
+                return investigation
+        raise KeyError(f"Finding not found: {finding.finding_id}")
+
+    def add_finding_evidence_link(
+        self,
+        investigation_id: str,
+        finding_id: str,
+        evidence: dict,
+    ) -> Investigation:
+        investigation = self.get_investigation(investigation_id)
+        for finding in investigation.findings:
+            if finding.finding_id == finding_id:
+                links = list(finding.metadata.get("linked_evidence") or [])
+                key = (evidence.get("type"), evidence.get("id"))
+                if key not in {(item.get("type"), item.get("id")) for item in links}:
+                    links.append(evidence)
+                finding.metadata["linked_evidence"] = links
+                self._touch(investigation)
+                return investigation
+        raise KeyError(f"Finding not found: {finding_id}")
 
     def set_report(self, investigation_id: str, report: DecisionReport) -> Investigation:
         investigation = self.get_investigation(investigation_id)

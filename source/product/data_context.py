@@ -32,7 +32,12 @@ def build_data_source_usage_context(store: Any, data_source_id: str) -> DataSour
             status=source.status,
             description=description,
             tags=list(source.tags),
-            schema_summary={"row_count": None, "column_count": None, "columns": []},
+            schema_summary={
+                "row_count": None,
+                "column_count": None,
+                "columns": [],
+                "execution_context": _execution_context_metadata(source),
+            },
             freshness=_freshness(source, None),
             linked_investigation_ids=list(source.linked_investigation_ids),
             previous_questions=previous_questions,
@@ -61,7 +66,7 @@ def build_data_source_usage_context(store: Any, data_source_id: str) -> DataSour
         status=source.status,
         description=description,
         tags=list(source.tags),
-        schema_summary=_schema_summary(profile, column_summaries),
+        schema_summary=_schema_summary(profile, column_summaries, source),
         column_summaries=column_summaries,
         sample_rows=list(profile.sampled_rows[:10]),
         missing_summary=dict(profile.missing_summary),
@@ -133,7 +138,7 @@ def _linked_previous_questions(store: Any, investigation_ids: list[str]) -> list
     return questions
 
 
-def _schema_summary(profile: DataSourceProfile, columns: list[ColumnUsageSummary]) -> dict[str, Any]:
+def _schema_summary(profile: DataSourceProfile, columns: list[ColumnUsageSummary], source: DataSource) -> dict[str, Any]:
     roles: dict[str, list[str]] = {}
     for column in columns:
         roles.setdefault(column.inferred_role.value, []).append(column.name)
@@ -142,6 +147,26 @@ def _schema_summary(profile: DataSourceProfile, columns: list[ColumnUsageSummary
         "column_count": profile.column_count,
         "columns": [column.name for column in columns],
         "roles": roles,
+        "execution_context": _execution_context_metadata(source),
+    }
+
+
+def _execution_context_metadata(source: DataSource) -> dict[str, Any]:
+    metadata = source.metadata if isinstance(source.metadata, dict) else {}
+    runtime = metadata.get("execution_context") if isinstance(metadata.get("execution_context"), dict) else metadata
+    return {
+        key: runtime.get(key)
+        for key in (
+            "dataset_id",
+            "dataset_runtime_reference",
+            "executable_available",
+            "row_count",
+            "storage_reference",
+            "created_at",
+            "last_loaded_at",
+            "unavailable_reason",
+        )
+        if key in runtime
     }
 
 

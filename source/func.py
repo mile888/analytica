@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional
 import ast
 import os
 import re
@@ -9,7 +9,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from source.config import ALLOWED_CODE_IMPORTS, MPLBACKEND, MPLCONFIGDIR
-from source.llm.llm_config import LLMConfig, EngineName, load_llm_config, resolve_api_key
+from source.llm.llm_config import EngineName
 from source.engine import BaseEngine, create_engine
 
 load_dotenv()
@@ -17,7 +17,7 @@ MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(MPLCONFIGDIR))
 os.environ.setdefault("MPLBACKEND", MPLBACKEND)
 
-from source.llm.factory import make_llm, _get_config
+from source.llm.factory import _get_config
 
 
 def detect_engine(df: Any, engine: Optional[str] = None) -> EngineName:
@@ -30,7 +30,7 @@ def detect_engine(df: Any, engine: Optional[str] = None) -> EngineName:
       3. Falls back to "pandas".
     """
     if engine and engine.strip().lower() in {"pandas", "polars", "spark"}:
-        return engine.strip().lower()  # type: ignore[return-value]
+        return engine.strip().lower()
 
     cfg = _get_config()
     return cfg.defaults.engine
@@ -409,7 +409,6 @@ def safe_exec(code: str, df: Any, engine: BaseEngine | EngineName) -> tuple[Any,
     if policy_error:
         return None, policy_error
 
-    # Resolve engine
     eng: BaseEngine = engine if isinstance(engine, BaseEngine) else create_engine(engine)
     env = eng.exec_env(df)
     builtins = dict(SAFE_BUILTINS)

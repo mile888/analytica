@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from source.product.investigation import Artifact, ArtifactType, ArtifactVisibility, DecisionReport, Finding
+from source.product.insight_quality import build_insight_metadata
 
 
 @dataclass
@@ -24,16 +25,22 @@ def agent_output_to_investigation_update(output: dict[str, Any] | None) -> Inves
     data = output if isinstance(output, dict) else {}
     structured = data.get("structured_report") if isinstance(data.get("structured_report"), dict) else {}
     summary = _first_text(data.get("summary"), structured.get("summary"), data.get("final_answer"))
-    key_findings = _text_list(structured.get("key_findings") or data.get("key_findings"))
+    raw_key_findings = _text_list(structured.get("key_findings") or data.get("key_findings"))
+    suppress_key_findings = _suppresses_key_findings(data, structured)
+    key_findings = [] if suppress_key_findings else [
+        item for item in raw_key_findings if not _is_profile_observation(item)
+    ]
     limitations = _text_list(structured.get("limitations") or data.get("limitations"))
     next_steps = _text_list(structured.get("next_steps") or data.get("next_steps"))
     generated_code = _first_text(data.get("generated_code"), structured.get("generated_code"), data.get("code"))
     sql_metadata = data.get("sql_metadata") if isinstance(data.get("sql_metadata"), dict) else {}
+    trace_metadata = data.get("trace_metadata") if isinstance(data.get("trace_metadata"), dict) else {}
     tool_timeline = data.get("tool_timeline") if isinstance(data.get("tool_timeline"), list) else []
     result_preview = _first_text(data.get("result_preview"))
     agent_artifacts = _coerce_agent_artifacts(data.get("artifacts") or structured.get("artifacts"))
 
     update = InvestigationUpdate()
+    execution_context_unavailable = bool(trace_metadata.get("execution_context_unavailable"))
 
     if summary or key_findings or limitations or next_steps:
         content = _report_content(summary, key_findings, limitations, next_steps)
@@ -46,20 +53,21 @@ def agent_output_to_investigation_update(output: dict[str, Any] | None) -> Inves
             limitations=limitations,
             next_steps=next_steps,
             content=content,
-            metadata={"source": "agent_output"},
+            metadata={"source": "agent_output", "trace_metadata": trace_metadata},
         )
-        update.artifacts.append(
-            Artifact(
-                artifact_type=ArtifactType.REPORT,
-                title="Decision report",
-                content=content,
-                visibility=ArtifactVisibility.USER,
-                pinned=True,
-                metadata={"source": "agent_output"},
+        if not execution_context_unavailable:
+            update.artifacts.append(
+                Artifact(
+                    artifact_type=ArtifactType.REPORT,
+                    title="Decision report",
+                    content=content,
+                    visibility=ArtifactVisibility.USER,
+                    pinned=True,
+                    metadata={"source": "agent_output"},
+                )
             )
-        )
 
-    if summary:
+    if summary and not execution_context_unavailable:
         update.artifacts.append(
             Artifact(
                 artifact_type=ArtifactType.TEXT,
@@ -69,13 +77,54 @@ def agent_output_to_investigation_update(output: dict[str, Any] | None) -> Inves
             )
         )
 
+    user_artifact_ids = [artifact.artifact_id for artifact in update.artifacts if artifact.visibility == ArtifactVisibility.USER]
     for item in key_findings:
-        update.findings.append(Finding(text=item, title="Finding"))
-
-    for item in limitations:
         update.findings.append(
-            Finding(text=item, title="Limitation", metadata={"kind": "limitation"})
+            Finding(
+                text=item,
+                title=_insight_title(item),
+                confidence=_confidence_value(
+                    build_insight_metadata(
+                        item,
+                        evidence=update.report.evidence if update.report else [],
+                        limitations=limitations,
+                        next_steps=next_steps,
+                        artifact_ids=user_artifact_ids,
+                        analysis_context=trace_metadata,
+                    ).get("confidence_level")
+                ),
+                metadata=build_insight_metadata(
+                    item,
+                    evidence=update.report.evidence if update.report else [],
+                    limitations=limitations,
+                    next_steps=next_steps,
+                    artifact_ids=user_artifact_ids,
+                    analysis_context=trace_metadata,
+                ),
+            )
         )
+
+    if not suppress_key_findings:
+        for item in limitations:
+            update.findings.append(
+                Finding(
+                    text=item,
+                    title="Limitation",
+                    confidence=0.35,
+                    metadata=build_insight_metadata(
+                        item,
+                        evidence=update.report.evidence if update.report else [],
+                        limitations=[item],
+                        next_steps=next_steps,
+                        artifact_ids=user_artifact_ids,
+                        kind="limitation",
+                        analysis_context=trace_metadata,
+                    ),
+                )
+            )
+
+    if execution_context_unavailable:
+        return update
 
     if generated_code:
         update.artifacts.append(
@@ -120,6 +169,60 @@ def agent_output_to_investigation_update(output: dict[str, Any] | None) -> Inves
     return update
 
 
+def _insight_title(text: str) -> str:
+    cleaned = " ".join(str(text).split())
+    if not cleaned:
+        return "Insight"
+    if len(cleaned) <= 78:
+        return cleaned.rstrip(".")
+    return cleaned[:75].rstrip(" .,") + "..."
+
+
+def _confidence_value(label: Any) -> float | None:
+    normalized = str(label or "").lower()
+    if normalized == "high":
+        return 0.85
+    if normalized == "medium":
+        return 0.65
+    if normalized == "low":
+        return 0.4
+    return None
+
+
+def _suppresses_key_findings(data: dict[str, Any], structured: dict[str, Any]) -> bool:
+    trace_metadata = data.get("trace_metadata") if isinstance(data.get("trace_metadata"), dict) else {}
+    analysis_type = str(
+        trace_metadata.get("analysis_type")
+        or structured.get("analysis_type")
+        or data.get("analysis_type")
+        or ""
+    ).lower()
+    return bool(trace_metadata.get("suppress_key_findings")) or analysis_type in {"overview", "profile", "suggestion"}
+
+
+def _is_profile_observation(text: str) -> bool:
+    normalized = " ".join(str(text or "").lower().split())
+    markers = (
+        "dataset has enough structure",
+        "enough structure for analytical",
+        "good candidates for quantitative analysis",
+        "candidate metric",
+        "candidate metrics",
+        "can anchor quantitative analysis",
+        "can explain differences between groups",
+        "useful for segmentation",
+        "supports trend analysis",
+        "enables trend",
+        "identifier columns should not",
+        "should not be treated as metrics",
+        "provides the grouping",
+        "provides the comparison metric",
+        "can be reviewed for distribution shape",
+        "has enough numeric companions",
+    )
+    return any(marker in normalized for marker in markers)
+
+
 def _first_text(*values: Any) -> str:
     for value in values:
         if value is None:
@@ -161,7 +264,7 @@ def _report_content(
     if summary:
         lines.extend(["## Summary", summary])
     if key_findings:
-        lines.append("## Findings")
+        lines.append("## Key insights")
         lines.extend(f"- {item}" for item in key_findings)
     if limitations:
         lines.append("## Limitations")

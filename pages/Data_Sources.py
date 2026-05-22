@@ -8,28 +8,29 @@ import streamlit as st
 from source.product.data_context import build_data_source_usage_context
 from source.product.data_profiling import profile_dataframe
 from source.product.data_sources import ColumnSemanticNote, ColumnSemanticRole, DataSource, DataSourceSemanticNotes, DataSourceType
+from source.product.question_suggestions import build_data_aware_question_suggestions
 from source.product.store_factory import create_investigation_store
 
 
-st.set_page_config(page_title="Analytica · Data Sources", layout="wide")
+st.set_page_config(page_title="Analytica · Datasets", layout="wide")
 
 if "investigation_store" not in st.session_state:
     st.session_state.investigation_store = create_investigation_store()
 
 store = st.session_state.investigation_store
 
-st.title("Data Sources")
-st.caption("Productized data sources for Investigations")
+st.title("Datasets")
+st.caption("Upload CSV datasets, profile them, and use them in investigations.")
 
 with st.sidebar:
-    st.subheader("Create source")
+    st.subheader("Upload dataset")
     uploaded = st.file_uploader("Upload CSV", type=["csv"])
     name = st.text_input("Name")
     description = st.text_area("Description", height=80)
-    tags = st.text_input("Tags", placeholder="sales, retention")
+    tags = st.text_input("Tags", placeholder="metric, operations")
     sep = st.selectbox("Separator", [",", ";", "\t"], index=0)
     encoding = st.selectbox("Encoding", ["utf-8", "utf-8-sig", "cp1251"], index=0)
-    if st.button("Create CSV source", disabled=uploaded is None or not name.strip(), width="stretch"):
+    if st.button("Upload CSV dataset", disabled=uploaded is None or not name.strip(), width="stretch"):
         raw = uploaded.getvalue()
         df = pd.read_csv(io.BytesIO(raw), sep=sep, encoding=encoding)
         source = DataSource(
@@ -42,11 +43,11 @@ with st.sidebar:
         saved = store.create_data_source(source)
         store.save_data_source_profile(saved.data_source_id, profile_dataframe(df))
         st.session_state.workspace_df = df
-        st.success("Data source created")
+        st.success("Dataset uploaded")
 
 sources = store.list_data_sources()
 if not sources:
-    st.info("No data sources yet.")
+    st.info("No datasets yet.")
     st.stop()
 
 table = pd.DataFrame(
@@ -73,24 +74,13 @@ for source in sources:
         if source.tags:
             st.caption("Tags: " + ", ".join(source.tags))
 
-        action_cols = st.columns(2)
-        with action_cols[0]:
-            investigations = store.list_investigations()
-            options = {"Select investigation": None}
-            options.update({item.title: item.investigation_id for item in investigations})
-            selected = st.selectbox("Link to Investigation", list(options.keys()), key=f"link-{source.data_source_id}")
-            if st.button("Link source", key=f"link-btn-{source.data_source_id}", disabled=options[selected] is None):
-                store.link_data_source_to_investigation(options[selected], source.data_source_id)
-                st.rerun()
-        with action_cols[1]:
-            if st.button(
-                "Archive",
-                key=f"archive-source-{source.data_source_id}",
-                disabled=source.status.value == "archived",
-                width="stretch",
-            ):
-                store.archive_data_source(source.data_source_id)
-                st.rerun()
+        investigations = store.list_investigations()
+        options = {"Select investigation": None}
+        options.update({item.title: item.investigation_id for item in investigations})
+        selected = st.selectbox("Link to investigation", list(options.keys()), key=f"link-{source.data_source_id}")
+        if st.button("Link dataset", key=f"link-btn-{source.data_source_id}", disabled=options[selected] is None):
+            store.link_data_source_to_investigation(options[selected], source.data_source_id)
+            st.rerun()
 
         with st.expander("Profile", expanded=False):
             try:
@@ -166,6 +156,9 @@ for source in sources:
                 st.markdown("Previous questions")
                 for question in context.previous_questions:
                     st.markdown(f"- {question}")
+            st.markdown("Suggested investigations")
+            for suggestion in build_data_aware_question_suggestions(usage_context=context, limit=6):
+                st.caption(suggestion)
 
         with st.expander("Semantic Notes", expanded=False):
             notes = store.get_data_source_semantic_notes(source.data_source_id)

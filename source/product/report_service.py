@@ -7,7 +7,11 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from source.product.exporter import export_shareable_report_html, export_shareable_report_markdown
+from source.product.exporter import (
+    export_shareable_report_html,
+    export_shareable_report_markdown,
+    export_shareable_report_txt,
+)
 from source.product.investigation import (
     DecisionMetadata,
     DecisionStatus,
@@ -15,7 +19,6 @@ from source.product.investigation import (
     FinalReportStatus,
     ReportApprovalStatus,
     ReportComment,
-    ReportCommentStatus,
     ReportSection,
     ShareableReport,
     ShareableReportStatus,
@@ -42,6 +45,24 @@ class ReportEditingService:
         section = self._find_section(report, section_id)
         self._record_edit(section, "content", section.content, content, user)
         section.content = content
+        return self.store.create_shareable_report(report)
+
+    def update_section(
+        self,
+        report_id: str,
+        section_id: str,
+        title: str | None = None,
+        content: str | None = None,
+        user: str = "user",
+    ) -> ShareableReport:
+        report = self._editable_snapshot(report_id, f"Updated section: {section_id}")
+        section = self._find_section(report, section_id)
+        if title is not None:
+            self._record_edit(section, "title", section.title, title, user)
+            section.title = title
+        if content is not None:
+            self._record_edit(section, "content", section.content, content, user)
+            section.content = content
         return self.store.create_shareable_report(report)
 
     def reorder_sections(self, report_id: str, section_ids: Sequence[str], user: str = "user") -> ShareableReport:
@@ -205,6 +226,7 @@ class ReportEditingService:
             created_by=created_by,
             markdown_content=export_shareable_report_markdown(report),
             html_content=export_shareable_report_html(report),
+            txt_content=export_shareable_report_txt(report),
             readiness_snapshot=_jsonable(readiness),
             approval_status=report.approval_status,
             approved_at=report.approved_at,

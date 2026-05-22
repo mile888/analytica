@@ -3,8 +3,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from source.config import UPLOAD_DIR
 
-DEFAULT_UPLOAD_DIR = Path(".analytica/uploads")
+
+DEFAULT_UPLOAD_DIR = UPLOAD_DIR
 
 
 def ensure_upload_dir(upload_dir: str | Path = DEFAULT_UPLOAD_DIR) -> Path:
@@ -31,3 +33,24 @@ def save_uploaded_csv(
     path = directory / f"{data_source_id}{suffix}"
     path.write_bytes(file_bytes)
     return str(path)
+
+
+def delete_uploaded_file_if_safe(
+    location: str | Path | None,
+    upload_dir: str | Path = DEFAULT_UPLOAD_DIR,
+) -> bool:
+    """Delete a local upload only when it is inside the managed upload dir."""
+    if not location:
+        return False
+    target = Path(location).expanduser()
+    root = Path(upload_dir).expanduser()
+    target_resolved = target.resolve()
+    root_resolved = root.resolve()
+    try:
+        is_managed_upload = target_resolved.is_relative_to(root_resolved)
+    except AttributeError:
+        is_managed_upload = str(target_resolved).startswith(str(root_resolved) + "/")
+    if not is_managed_upload or not target_resolved.is_file():
+        return False
+    target_resolved.unlink()
+    return True

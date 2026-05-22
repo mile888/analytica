@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 import { uploadCsvDataSource, UploadCsvDataSourceResponse } from "@/lib/api";
-import { parseTags } from "@/lib/forms";
 import { Card } from "@/components/ui";
 
 export function UploadCsvDataSourceForm() {
@@ -26,8 +25,7 @@ export function UploadCsvDataSourceForm() {
       const response = await uploadCsvDataSource({
         file,
         name: String(formData.get("name") || "") || null,
-        description: String(formData.get("description") || "") || null,
-        tags: parseTags(String(formData.get("tags") || ""))
+        description: String(formData.get("description") || "") || null
       });
       setCreated(response);
       router.refresh();
@@ -45,8 +43,10 @@ export function UploadCsvDataSourceForm() {
 
   return (
     <Card>
-      <h2 className="text-sm font-semibold text-slate-950">Upload CSV</h2>
-      <p className="mt-1 text-xs text-slate-500">Creates a DataSource, stores the file locally and profiles it.</p>
+      <h2 className="text-sm font-semibold text-slate-950 dark:text-slate-50">Upload dataset</h2>
+      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+        Upload a CSV and Analytica will create the dataset, profile it, and make it available for investigation.
+      </p>
       <form onSubmit={onSubmit} className="mt-4 grid gap-3">
         <input
           name="file"
@@ -57,7 +57,6 @@ export function UploadCsvDataSourceForm() {
         />
         <input name="name" placeholder="Name, optional" className="rounded-md border border-slate-300 px-3 py-2 text-sm" />
         <textarea name="description" placeholder="Description" rows={3} className="rounded-md border border-slate-300 px-3 py-2 text-sm" />
-        <input name="tags" placeholder="Tags, comma-separated" className="rounded-md border border-slate-300 px-3 py-2 text-sm" />
         <button disabled={isSubmitting} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-400">
           {isSubmitting ? "Uploading..." : "Upload CSV"}
         </button>
@@ -66,7 +65,7 @@ export function UploadCsvDataSourceForm() {
       {created ? (
         <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
           <p>
-            Uploaded. <Link className="underline" href={`/data-sources/${created.data_source.data_source_id}`}>Open data source</Link>
+            Uploaded. <Link className="underline" href={`/data-sources/${created.data_source.data_source_id}`}>Open dataset</Link>
           </p>
           <p className="mt-1 text-xs">
             Profile: {created.profile.row_count} rows, {created.profile.column_count} columns.

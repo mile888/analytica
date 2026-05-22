@@ -127,7 +127,7 @@ def test_html_export_escapes_unsafe_content() -> None:
     assert "&lt;img src=x onerror=alert(1)&gt;" in html
 
 
-def test_markdown_export_orders_accepted_findings_before_proposed() -> None:
+def test_markdown_export_accepted_findings_before_proposed() -> None:
     investigation = Investigation(title="Findings", user_question="Question?")
     investigation.findings = [
         Finding(title="Proposed", text="Proposed finding", status=FindingStatus.PROPOSED),

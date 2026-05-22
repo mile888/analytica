@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import re
 import sqlite3
 from pathlib import Path
@@ -24,24 +25,123 @@ class DataFrameSqlResult(NamedTuple):
     table_name: str
 
 
-def read_csv_dataset(path: str | Path, **kwargs: Any) -> pd.DataFrame:
-    """Read a CSV from an absolute path or a path relative to the project root."""
-    csv_path = resolve_project_path(path)
+def resolve_csv_dataset_path(path: str | Path) -> Path:
+    """Resolve a CSV file path, or choose the first CSV when given a directory."""
+    raw_path = Path(path)
+    csv_path = raw_path if raw_path.exists() else resolve_project_path(path)
     if not csv_path.exists():
-        raise FileNotFoundError(f"CSV file not found: {csv_path}")
-    if not csv_path.is_file():
-        raise ValueError(f"CSV path is not a file: {csv_path}")
+        raise FileNotFoundError(f"CSV path not found: {csv_path}")
+    if csv_path.is_dir():
+        candidates = sorted(item for item in csv_path.iterdir() if item.is_file() and item.suffix.lower() == ".csv")
+        if not candidates:
+            raise FileNotFoundError(f"No CSV files found in directory: {csv_path}")
+        return candidates[0]
+    if csv_path.suffix.lower() != ".csv":
+        raise ValueError(f"CSV path must point to a .csv file: {csv_path}")
+    return csv_path
+
+
+def read_csv_dataset(path: str | Path, **kwargs: Any) -> pd.DataFrame:
+    """Read a CSV file or the first CSV in a directory."""
+    csv_path = resolve_csv_dataset_path(path)
     read_kwargs = dict(kwargs)
     try:
-        return pd.read_csv(csv_path, **read_kwargs)
+        return _read_csv_with_dialect_recovery(csv_path, read_kwargs)
     except pd.errors.ParserError:
         retry_kwargs = dict(read_kwargs)
         retry_kwargs.setdefault("escapechar", chr(92))
         try:
-            return pd.read_csv(csv_path, **retry_kwargs)
+            return _read_csv_with_dialect_recovery(csv_path, retry_kwargs)
         except pd.errors.ParserError:
             retry_kwargs.setdefault("on_bad_lines", "skip")
-            return pd.read_csv(csv_path, **retry_kwargs)
+            return _read_csv_with_dialect_recovery(csv_path, retry_kwargs)
+
+
+def infer_delimiter_from_text(sample: str) -> str | None:
+    """Infer a likely CSV delimiter from raw text without dataset-specific assumptions."""
+    if not sample.strip():
+        return None
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        delimiter = str(dialect.delimiter)
+        return delimiter if delimiter in {",", ";", "\t", "|"} else None
+    except csv.Error:
+        return _score_delimiter_candidates(sample)
+
+
+def dataframe_looks_glued(df: pd.DataFrame) -> bool:
+    """Return True when a parsed frame still appears to contain delimited rows in one column."""
+    if not isinstance(df, pd.DataFrame) or len(df.columns) != 1:
+        return False
+    values = [str(df.columns[0])]
+    values.extend(str(value) for value in df.iloc[:20, 0].dropna().tolist())
+    sample = "\n".join(values)
+    delimiter = infer_delimiter_from_text(sample)
+    return bool(delimiter and _line_field_count(sample.splitlines()[0], delimiter) > 1)
+
+
+def parse_glued_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, str] | None:
+    """Parse a one-column dataframe whose header/values still contain a delimiter."""
+    if not dataframe_looks_glued(df):
+        return None
+    values = [str(df.columns[0])]
+    values.extend("" if pd.isna(value) else str(value) for value in df.iloc[:, 0].tolist())
+    sample = "\n".join(values)
+    delimiter = infer_delimiter_from_text(sample)
+    if not delimiter:
+        return None
+    try:
+        import io
+
+        parsed = pd.read_csv(io.StringIO(sample), sep=delimiter)
+    except Exception:
+        return None
+    if len(parsed.columns) <= 1:
+        return None
+    return parsed, delimiter
+
+
+def _read_csv_with_dialect_recovery(csv_path: Path, read_kwargs: dict[str, Any]) -> pd.DataFrame:
+    df = pd.read_csv(csv_path, **read_kwargs)
+    if not dataframe_looks_glued(df) or "sep" in read_kwargs or "delimiter" in read_kwargs:
+        return df
+    sample = _read_text_sample(csv_path)
+    delimiter = infer_delimiter_from_text(sample)
+    if not delimiter:
+        return df
+    recovered = pd.read_csv(csv_path, sep=delimiter, **{key: value for key, value in read_kwargs.items() if key not in {"sep", "delimiter"}})
+    return recovered if len(recovered.columns) > len(df.columns) else df
+
+
+def _read_text_sample(csv_path: Path, limit: int = 65536) -> str:
+    try:
+        with csv_path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+            return handle.read(limit)
+    except OSError:
+        return ""
+
+
+def _score_delimiter_candidates(sample: str) -> str | None:
+    lines = [line for line in sample.splitlines()[:20] if line.strip()]
+    if not lines:
+        return None
+    best: tuple[str, int, int] | None = None
+    for delimiter in (",", ";", "\t", "|"):
+        counts = [_line_field_count(line, delimiter) for line in lines]
+        useful = [count for count in counts if count > 1]
+        if not useful:
+            continue
+        score = (min(useful), sum(useful))
+        if best is None or score > (best[1], best[2]):
+            best = (delimiter, score[0], score[1])
+    return best[0] if best else None
+
+
+def _line_field_count(line: str, delimiter: str) -> int:
+    try:
+        return len(next(csv.reader([line], delimiter=delimiter)))
+    except csv.Error:
+        return len(line.split(delimiter))
 
 
 def dataframe_profile(df: pd.DataFrame, *, sample_rows: int = 5) -> dict[str, Any]:
