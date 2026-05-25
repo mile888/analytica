@@ -1308,6 +1308,7 @@ class SQLiteInvestigationStore:
 
     @staticmethod
     def _shareable_report_from_row(row: sqlite3.Row) -> ShareableReport:
+        metadata = _loads(row["metadata_json"], {})
         return ShareableReport(
             report_id=row["id"],
             investigation_id=row["investigation_id"],
@@ -1325,10 +1326,15 @@ class SQLiteInvestigationStore:
             created_at=_parse_dt(row["created_at"]),
             updated_at=_parse_dt(row["updated_at"]),
             sections=[_section_from_dict(item) for item in _loads(row["sections_json"], [])],
+            dataset_ids=list(metadata.get("dataset_ids") or []),
+            branch_ids=list(metadata.get("branch_ids") or []),
+            included_question_ids=list(metadata.get("included_question_ids") or []),
+            summary=str(metadata.get("summary") or ""),
+            limitations=list(metadata.get("limitations") or []),
             source_finding_ids=_loads(row["source_finding_ids_json"], []),
             source_artifact_ids=_loads(row["source_artifact_ids_json"], []),
             include_technical=bool(row["include_technical"]),
-            metadata=_loads(row["metadata_json"], {}),
+            metadata=metadata,
         )
 
     @staticmethod

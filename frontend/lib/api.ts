@@ -1,15 +1,16 @@
-const DEFAULT_API_URL = "http://localhost:8000";
+const DEFAULT_INTERNAL_API_URL = "http://backend:8000";
+const SAME_ORIGIN_API_BASE = "/api";
 
 function getPublicApiBaseUrl() {
-  return process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_API_URL;
+  return process.env.NEXT_PUBLIC_API_URL || "";
 }
 
 function getApiBaseUrl() {
   const publicUrl = getPublicApiBaseUrl();
   if (typeof window === "undefined") {
-    return process.env.INTERNAL_API_URL || publicUrl;
+    return process.env.INTERNAL_API_URL || publicUrl || DEFAULT_INTERNAL_API_URL;
   }
-  return publicUrl;
+  return publicUrl || SAME_ORIGIN_API_BASE;
 }
 
 type FetchOptions = RequestInit & { query?: Record<string, string | number | boolean | undefined | null> };
@@ -31,6 +32,16 @@ export function buildApiUrl(
   query: Record<string, string | number | boolean | undefined | null> = {},
   baseUrl = getApiBaseUrl()
 ) {
+  if (baseUrl.startsWith("/")) {
+    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+    const url = new URL(`${baseUrl}${normalizedPath}`, "http://same-origin.local");
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined && value !== null && value !== "") {
+        url.searchParams.set(key, String(value));
+      }
+    }
+    return `${url.pathname}${url.search}`;
+  }
   const url = new URL(path, baseUrl);
   for (const [key, value] of Object.entries(query)) {
     if (value !== undefined && value !== null && value !== "") {
@@ -41,7 +52,7 @@ export function buildApiUrl(
 }
 
 export function reportPdfDownloadUrl(reportId: string) {
-  return buildApiUrl(`/reports/${reportId}/download/pdf`, {}, getPublicApiBaseUrl());
+  return buildApiUrl(`/reports/${reportId}/download/pdf`, {}, getPublicApiBaseUrl() || SAME_ORIGIN_API_BASE);
 }
 
 export async function apiFetch<T>(path: string, options: FetchOptions = {}): Promise<T> {
@@ -100,6 +111,11 @@ export interface InvestigationBranch {
   branch_id: string;
   title: string;
   branch_type: string;
+  intent_type?: string;
+  dataset_scope?: string | null;
+  dataset_id?: string | null;
+  dataset_ids?: string[];
+  active_artifact_id?: string | null;
   metric?: string | null;
   dimension?: string | null;
   filters?: Array<{ column: string; operator: string; value: string }>;
@@ -270,7 +286,9 @@ export interface DataSourceProfile {
 
 export interface UploadCsvDataSourceResponse {
   data_source: DataSource;
-  profile: DataSourceProfile;
+  profile: DataSourceProfile | null;
+  profile_status?: "complete" | "partial";
+  warnings?: string[];
 }
 
 export interface DataSourceUsageContext {
@@ -334,6 +352,10 @@ export interface ReportSection {
   title: string;
   content: string;
   order: number;
+  section_type?: string;
+  source_branch_id?: string | null;
+  source_artifact_ids?: string[];
+  source_question_ids?: string[];
   artifact_ids: string[];
   edited_by_user: boolean;
   created_by: string;
@@ -357,6 +379,11 @@ export interface ShareableReport {
   approved_at?: string | null;
   approved_by?: string | null;
   sections: ReportSection[];
+  dataset_ids?: string[];
+  branch_ids?: string[];
+  included_question_ids?: string[];
+  summary?: string;
+  limitations?: string[];
   source_finding_ids: string[];
   source_artifact_ids: string[];
   include_technical: boolean;
@@ -573,6 +600,30 @@ export function selectArtifactForReport(investigationId: string, artifactId: str
   });
 }
 
+export function explainArtifact(investigationId: string, artifactId: string) {
+  return apiFetch<{
+    request_type: string;
+    artifact_id: string;
+    title: string;
+    chart_type: string;
+    metric: string;
+    dimension: string;
+    dataset_id: string;
+    dataset_ids: string[];
+    filters: unknown[];
+    row_count: number | null;
+    branch_id: string;
+    run_id: string;
+    rows?: number;
+    bins?: number;
+    comparison_groups?: number;
+    summary?: Record<string, number>;
+  }>(`/investigations/${investigationId}/artifacts/${artifactId}/explain`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
 export function getReport(reportId: string) {
   return apiFetch<ShareableReport>(`/reports/${reportId}`);
 }
@@ -723,9 +774,18 @@ export async function uploadCsvDataSource(payload: UploadCsvDataSourcePayload) {
     cache: "no-store"
   });
   if (!response.ok) {
-    throw new ApiError(response.status, await response.text());
+    const body = await response.text();
+    let detail = body;
+    try {
+      const parsed = JSON.parse(body);
+      if (typeof parsed.detail === "string") detail = parsed.detail;
+    } catch {
+      // body is not JSON, use as-is
+    }
+    throw new ApiError(response.status, detail);
   }
   return response.json() as Promise<UploadCsvDataSourceResponse>;
+
 }
 
 export function getDataSource(id: string) {

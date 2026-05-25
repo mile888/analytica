@@ -12,6 +12,7 @@ from source.product.data_sources import DataSourceProfile
 from source.product.dataframe_resolver import resolve_dataframe_from_data_source
 from source.product.investigation import utc_now
 from source.product.execution_planner import AuthoritativeExecutionPlanner
+from source.product.question_routing import classify_question_intent, is_non_analytical_intent
 
 
 DEFAULT_RUNTIME_DIR = RUNTIME_DIR
@@ -256,6 +257,8 @@ def execution_required_for_question(
     data_context: dict[str, Any] | None = None,
 ) -> bool:
     if not str(question or "").strip():
+        return False
+    if is_non_analytical_intent(classify_question_intent(question)):
         return False
     planning_df = df if isinstance(df, pd.DataFrame) else schema_only_dataframe_from_context(data_context)
     try:

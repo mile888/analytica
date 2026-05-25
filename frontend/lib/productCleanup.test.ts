@@ -22,7 +22,7 @@ describe("investigation workspace product cleanup", () => {
     const appShell = source("components/AppShell.tsx");
     const investigationFilter = source("lib/investigations.ts");
 
-    expect((appShell.match(/<ThemeToggle/g) || []).length).toBe(1);
+    expect((appShell.match(/<ThemeToggle/g) || []).length).toBe(2);
     expect(appShell).toContain("productInvestigations");
     expect(investigationFilter).toContain("HIDDEN_INVESTIGATION_TITLE_PATTERNS");
     expect(appShell).toContain(".slice(0, 3)");
@@ -138,6 +138,18 @@ describe("investigation workspace product cleanup", () => {
     expect((rail.match(/<BranchSwitcher/g) || []).length).toBe(1);
   });
 
+  it("shows multi-dataset context without cluttering single dataset artifacts", () => {
+    const chat = source("components/ChatWorkspace.tsx");
+    const chartCard = source("components/ChartArtifactCard.tsx");
+    const tableCard = source("components/TableArtifactCard.tsx");
+
+    expect(chat).toContain("showDatasetDetails");
+    expect(chat).toContain("Active:");
+    expect(chat).toContain("artifactDatasetLabel");
+    expect(chartCard).toContain("datasetLabel");
+    expect(tableCard).toContain("datasetLabel");
+  });
+
   it("keeps Danger Zone in the scrolling main insight stack", () => {
     const page = source("app/investigations/[id]/page.tsx");
     const sidebar = source("components/InvestigationKnowledgeSidebar.tsx");
@@ -182,7 +194,21 @@ describe("investigation workspace product cleanup", () => {
     expect(card).toContain("activateInvestigationBranch");
     expect(card).toContain('action: "explain_artifact"');
     expect(card).toContain("artifact_id: artifact.artifact_id");
-    expect(card).toContain("branch_id: branchId");
+    expect(card).toContain("branchId || undefined");
     expect(card).toContain("artifactBranchId");
+    // Chart metadata is passed for artifact-first resolution
+    expect(card).toContain("chart_type:");
+    expect(card).toContain("chart_title:");
+    expect(card).toContain("metric:");
+    // Branch activation is best-effort (wrapped in try/catch)
+    expect(card).toContain("// Branch not found or stale");
+  });
+
+  it("adjusted chart actions keep the transformed artifact id available", () => {
+    const card = source("components/ChartArtifactCard.tsx");
+
+    expect(card).toContain("artifact.artifact_id");
+    expect(card).toContain("metadata: {");
+    expect(card).toContain("action: \"explain_artifact\"");
   });
 });

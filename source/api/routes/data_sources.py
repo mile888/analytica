@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from source.api.deps import get_store
 from source.api.serialization import to_jsonable
-from source.dataframe import read_csv_dataset
+from source.dataframe import CsvLoadError, read_csv_dataset
 from source.product.data_context import build_data_source_usage_context
 from source.product.execution_context import mark_profile_only_runtime, persist_dataset_runtime
 from source.product.data_profiling import profile_csv
@@ -91,11 +91,17 @@ async def upload_csv_data_source(
     description: Annotated[str | None, Form()] = None,
     tags: Annotated[list[str] | None, Form()] = None,
 ):
+    import logging
+
+    logger = logging.getLogger("analytica.upload")
     filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only .csv files are supported.")
 
     contents = await file.read()
+    if not contents.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+
     source = DataSource(
         name=(name or filename.rsplit(".", 1)[0] or "Uploaded CSV").strip(),
         data_source_type=DataSourceType.CSV,
@@ -103,27 +109,123 @@ async def upload_csv_data_source(
         tags=_parse_form_tags(tags),
         metadata={"original_filename": filename, "upload_kind": "csv"},
     )
-    location = save_uploaded_csv(contents, filename, source.data_source_id)
+
+    # --- Stage 1: Save file to disk ---
+    try:
+        location = save_uploaded_csv(contents, filename, source.data_source_id)
+    except Exception as exc:
+        logger.exception("File save failed for %s", filename)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not save uploaded file: {type(exc).__name__}",
+        ) from exc
+
     source.location = location
     store = get_store()
     created = store.create_data_source(source)
+    warnings: list[str] = []
+    profile_status = "complete"
+
+    # --- Stage 2: Profile the CSV ---
+    profile = None
     try:
         profile = profile_csv(location)
-    except (pd.errors.ParserError, UnicodeDecodeError, ValueError) as exc:
+    except (pd.errors.ParserError, UnicodeDecodeError, CsvLoadError) as exc:
         created.status = DataSourceStatus.ERROR
+        if isinstance(exc, CsvLoadError):
+            user_detail = exc.user_message
+        elif isinstance(exc, UnicodeDecodeError):
+            user_detail = (
+                "Could not decode the uploaded CSV file. "
+                "The file may use a non-standard encoding. "
+                "Try re-saving it as UTF-8 CSV from Excel or Google Sheets."
+            )
+        else:
+            user_detail = f"Could not parse CSV: {exc}"
         created.metadata["profile_error"] = str(exc)
         store.update_data_source(created)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Could not parse CSV: {exc}") from exc
-    store.save_data_source_profile(created.data_source_id, profile)
-    df = _read_uploaded_runtime_csv(location)
-    if df.empty and len(df.columns) == 0:
-        mark_profile_only_runtime(store, created.data_source_id, reason="empty_dataframe")
-    else:
-        persist_dataset_runtime(store, created.data_source_id, df)
-    return {
-        "data_source": to_jsonable(store.get_data_source(created.data_source_id)),
-        "profile": to_jsonable(profile),
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=user_detail) from exc
+    except Exception as exc:
+        logger.exception("Profiling failed for %s (non-fatal)", filename)
+        warnings.append(f"Profiling partially failed: {type(exc).__name__}: {exc}")
+        profile_status = "partial"
+
+    # --- Stage 3: Save profile (if available) ---
+    if profile is not None:
+        try:
+            store.save_data_source_profile(created.data_source_id, profile)
+        except Exception as exc:
+            logger.exception("Profile save failed for %s (non-fatal)", created.data_source_id)
+            warnings.append(f"Profile could not be saved: {type(exc).__name__}")
+            profile_status = "partial"
+
+    # --- Stage 4: Persist runtime (SQLite for execution) ---
+    try:
+        df = _read_uploaded_runtime_csv(location)
+        if df.empty and len(df.columns) == 0:
+            mark_profile_only_runtime(store, created.data_source_id, reason="empty_dataframe")
+        else:
+            # Sanitize column names to avoid SQLite errors with empty/blank names
+            sanitized_columns = []
+            for i, col in enumerate(df.columns):
+                col_str = str(col).strip()
+                if not col_str or col_str.startswith("Unnamed:"):
+                    col_str = f"column_{i}"
+                sanitized_columns.append(col_str)
+            if len(set(sanitized_columns)) < len(sanitized_columns):
+                seen: dict[str, int] = {}
+                deduped: list[str] = []
+                for col_name in sanitized_columns:
+                    if col_name in seen:
+                        seen[col_name] += 1
+                        deduped.append(f"{col_name}_{seen[col_name]}")
+                    else:
+                        seen[col_name] = 0
+                        deduped.append(col_name)
+                sanitized_columns = deduped
+            df.columns = pd.Index(sanitized_columns)
+            persist_dataset_runtime(store, created.data_source_id, df)
+    except Exception as exc:
+        logger.exception("Runtime persistence failed for %s (non-fatal)", created.data_source_id)
+        warnings.append(f"Runtime persistence failed: {type(exc).__name__}: {exc}")
+        try:
+            mark_profile_only_runtime(store, created.data_source_id, reason=f"runtime_failed:{type(exc).__name__}")
+        except Exception:
+            pass
+
+    # --- Stage 5: Build response ---
+    try:
+        data_source_payload = to_jsonable(store.get_data_source(created.data_source_id))
+    except Exception as exc:
+        logger.exception("Data source serialization failed (non-fatal)")
+        data_source_payload = {"data_source_id": created.data_source_id, "name": created.name, "status": "active"}
+
+    profile_payload = None
+    if profile is not None:
+        try:
+            profile_payload = to_jsonable(profile)
+        except Exception as exc:
+            logger.exception("Profile serialization failed (non-fatal)")
+            warnings.append(f"Profile serialization failed: {type(exc).__name__}")
+            profile_status = "partial"
+            profile_payload = {
+                "row_count": getattr(profile, "row_count", 0),
+                "column_count": getattr(profile, "column_count", 0),
+                "columns": [],
+                "missing_summary": {},
+                "numeric_summary": {},
+                "categorical_summary": {},
+                "sampled_rows": [],
+            }
+
+    response: dict[str, object] = {
+        "data_source": data_source_payload,
+        "profile": profile_payload,
     }
+    if warnings:
+        response["profile_status"] = profile_status
+        response["warnings"] = warnings
+    return response
 
 
 @router.get("/{data_source_id}")
@@ -275,8 +377,8 @@ def _read_uploaded_runtime_csv(location: str) -> pd.DataFrame:
         return read_csv_dataset(location)
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
-    except pd.errors.ParserError:
+    except (pd.errors.ParserError, UnicodeDecodeError):
         try:
             return read_csv_dataset(location, escapechar=chr(92))
-        except pd.errors.ParserError:
+        except (pd.errors.ParserError, UnicodeDecodeError):
             return read_csv_dataset(location, escapechar=chr(92), on_bad_lines="skip")

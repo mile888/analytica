@@ -8,11 +8,8 @@ from typing import Any
 import pandas as pd
 
 from source.product.fallbacks.semantic_resolution import (
-    CUSTOMER_LIKE_MARKERS,
     LOCATION_LIKE_MARKERS,
     ORDER_DATE_MARKERS,
-    PRODUCT_LIKE_MARKERS,
-    SALES_LIKE_MARKERS,
     column_by_markers,
     resolve_dimension_column,
     resolve_categorical_value,
@@ -56,6 +53,7 @@ class AuthoritativeQueryPlan:
     dimension: str | None = None
     dimension_source: str | None = None
     filters: list[QueryFilter] = field(default_factory=list)
+    unresolved_filter_terms: list[str] = field(default_factory=list)
     time_axis: str | None = None
     time_grain: str | None = None
     aggregation: str | None = None
@@ -64,6 +62,7 @@ class AuthoritativeQueryPlan:
     target_entity: str | None = None
     aggregate_function: str | None = None
     ranking_direction: str | None = None
+    limit: int | None = None
     chart_type: str | None = None
     transformation: str | None = None
     hypothesis: str | None = None
@@ -90,8 +89,10 @@ class AuthoritativeQueryPlan:
 
 
 class SafeBusinessAliasResolver:
+    SALES_PRIMARY_MARKERS = ("sales", "sale", "revenue", "amount", "order value", "transaction amount", "выруч", "продаж", "доход", "оборот")
+    SALES_PROXY_MARKERS = ("quantity", "qty", "volume", "transactions", "transaction count", "orders", "units", "колич", "объем", "объём")
     METRIC_ALIAS_GROUPS = {
-        "sales_like": SALES_LIKE_MARKERS,
+        "sales_like": SALES_PRIMARY_MARKERS,
         "profit_like": ("profit", "margin", "прибыл"),
         "cost_like": ("cost", "expense", "затрат", "расход"),
         "price_like": ("price", "цена"),
@@ -124,8 +125,21 @@ class SafeBusinessAliasResolver:
                 alias_phrase = _matched_question_phrase(normalized, alias_group) or phrase
                 aliases.append(SafeAlias(phrase=alias_phrase, resolved_to=target, alias_type="metric"))
                 return target, alias_phrase, aliases
+            if alias_group == cls.SALES_PRIMARY_MARKERS:
+                proxy = column_by_markers(metric_columns, cls.SALES_PROXY_MARKERS) or column_by_markers(columns, cls.SALES_PROXY_MARKERS)
+                if proxy:
+                    alias_phrase = _matched_question_phrase(normalized, alias_group) or phrase
+                    aliases.append(SafeAlias(phrase=alias_phrase, resolved_to=proxy, alias_type="metric_proxy"))
+                    return proxy, alias_phrase, aliases
             return None, phrase, aliases
-        numeric = metric_columns or [col for col in columns if _is_numeric_like(col)]
+        if metric_columns:
+            return metric_columns[0], None, aliases
+        # Fallback: pick columns with metric-like names, but only if they are actually numeric
+        if isinstance(df, pd.DataFrame):
+            actual_numeric = {str(c) for c in df.select_dtypes(include="number").columns}
+            numeric = [col for col in columns if _is_numeric_like(col) and col in actual_numeric and not _is_year_like(df[col], col)]
+        else:
+            numeric = [col for col in columns if _is_numeric_like(col)]
         return (numeric[0] if numeric else None), None, aliases
 
     @classmethod
@@ -213,7 +227,7 @@ class AuthoritativeExecutionPlanner:
             metric,
             df if isinstance(df, pd.DataFrame) else None,
         )
-        filters = _resolve_filters(question, df) if isinstance(df, pd.DataFrame) else []
+        filters, unresolved_filter_terms = _resolve_filters_with_unresolved(question, df) if isinstance(df, pd.DataFrame) else ([], [])
         chart_type = ChartIntentPlanner.resolve(normalized)
         time_axis = _resolve_time_axis(normalized, columns)
         intent = _resolve_intent(normalized, chart_type)
@@ -224,14 +238,19 @@ class AuthoritativeExecutionPlanner:
         if intent == "general" and metric and aggregation in {"mean", "sum", "count"} and filters:
             intent = "constrained_aggregation"
         ranking_direction = "ascending" if _has_minimum_intent(normalized) else "descending"
+        limit = _requested_limit(normalized)
         missing: list[str] = []
         if intent in {"rank_groups", "filtered_minmax", "constrained_aggregation"} and not metric:
             missing.append("metric")
         if intent == "rank_groups" and not dimension:
             missing.append("dimension")
-        if intent in {"histogram", "seasonality_heatmap", "growth", "shipping_delay", "temporal_trend", "chart_request", "extremum"} and not metric:
+        if intent in {"histogram", "seasonality_heatmap", "growth", "shipping_delay", "temporal_trend", "extremum"} and not metric:
             missing.append("metric")
-        if intent in {"growth", "seasonality_heatmap", "shipping_delay", "temporal_trend", "chart_request"} and not time_axis:
+        if intent == "chart_request" and not metric and not dimension:
+            missing.append("metric")
+        if intent in {"growth", "seasonality_heatmap", "shipping_delay", "temporal_trend"} and not time_axis:
+            missing.append("time_axis")
+        if intent == "chart_request" and not time_axis and not dimension and not metric:
             missing.append("time_axis")
         scope = "follow_up" if _is_followup(normalized) else "new_task"
         requires_new = scope == "new_task"
@@ -252,6 +271,7 @@ class AuthoritativeExecutionPlanner:
             target_entity=dimension,
             aggregate_function=aggregate_function,
             ranking_direction=ranking_direction,
+            limit=limit,
             chart_type=chart_type,
             transformation=transformation,
             hypothesis=question if "hypothesis" in normalized or "гипотез" in normalized else None,
@@ -259,6 +279,7 @@ class AuthoritativeExecutionPlanner:
             scope=scope,
             requires_new_branch=requires_new,
             can_use_active_branch=not requires_new,
+            unresolved_filter_terms=unresolved_filter_terms,
             missing_required_fields=missing,
             safe_aliases=aliases,
             forbidden_substitutions=SafeBusinessAliasResolver.forbidden_for(question),
@@ -338,6 +359,8 @@ def _resolve_intent(normalized: str, chart_type: str | None) -> str:
         return "shipping_delay"
     if any(marker in normalized for marker in ("growth", "trend", "рост", "динамик")) and any(marker in normalized for marker in ("shipping", "delay", "ship", "delivery")):
         return "shipping_delay"
+    if chart_type == "line":
+        return "chart_request"
     if chart_type and _has_temporal_intent(normalized):
         return "chart_request"
     if _has_temporal_intent(normalized):
@@ -372,6 +395,17 @@ def _requested_dimension_type(normalized: str) -> str | None:
     by_match = re.search(r"\b(?:by|across|per|по)\s+(.+)$", normalized)
     if by_match:
         return _clean_requested_dimension(by_match.group(1))
+    return None
+
+
+def _requested_limit(normalized: str) -> int | None:
+    match = re.search(r"\btop\s+(\d{1,3})\b", normalized)
+    if match:
+        try:
+            value = int(match.group(1))
+        except ValueError:
+            return None
+        return max(1, min(value, 100))
     return None
 
 
@@ -476,6 +510,10 @@ def _metric_candidate_columns(columns: list[str], df: pd.DataFrame | None) -> li
         series = df[column]
         if pd.api.types.is_bool_dtype(series) or pd.api.types.is_datetime64_any_dtype(series):
             continue
+        if _is_identifier_column(series, column):
+            continue
+        if _is_year_like(series, column):
+            continue
         if pd.api.types.is_numeric_dtype(series):
             candidates.append(column)
             continue
@@ -485,24 +523,139 @@ def _metric_candidate_columns(columns: list[str], df: pd.DataFrame | None) -> li
     return candidates
 
 
+def _is_year_like(series: pd.Series, name: str) -> bool:
+    """Detect year-only numeric columns to exclude from metric candidates."""
+    normalized = _normalize(name)
+    if not any(marker in normalized for marker in ("year", "год", "yr")):
+        return False
+    if not pd.api.types.is_numeric_dtype(series):
+        return False
+    sample = pd.to_numeric(series.dropna().head(50), errors="coerce").dropna()
+    if sample.empty:
+        return False
+    min_val, max_val = float(sample.min()), float(sample.max())
+    return 1800 <= min_val and max_val <= 2100 and (max_val - min_val) <= 200
+
+
+_IDENTIFIER_NAME_MARKERS = (
+    "row id", "row_id", "rowid", "row number",
+    "order id", "order_id", "orderid", "order number",
+    "customer id", "customer_id", "customerid",
+    "product id", "product_id", "productid",
+    "invoice id", "invoice_id", "invoice number",
+    "transaction id", "transaction_id",
+    "ticket id", "ticket_id", "ticket number",
+    "employee id", "employee_id",
+    "user id", "user_id",
+    "item id", "item_id",
+    "record id", "record_id",
+)
+
+
+def _is_identifier_column(series: pd.Series, name: str) -> bool:
+    """Detect identifier columns that should never be used as analytical metrics."""
+    normalized = _normalize(name)
+    if normalized in ("id", "uuid", "key"):
+        return True
+    if normalized.endswith(" id") or normalized.endswith("_id"):
+        return True
+    if any(marker in normalized for marker in _IDENTIFIER_NAME_MARKERS):
+        return True
+    if any(marker in normalized for marker in ("postal", "zip", "postcode", "zipcode")):
+        return True
+    non_null = series.dropna()
+    if len(non_null) > 20:
+        unique_ratio = non_null.nunique(dropna=True) / max(len(non_null), 1)
+        if unique_ratio > 0.9 and not any(
+            marker in normalized
+            for marker in ("amount", "value", "price", "cost", "revenue", "sales", "profit", "score", "rating", "salary", "duration", "quantity")
+        ):
+            return True
+    return False
+
+
 def _resolve_filters(question: str, df: pd.DataFrame) -> list[QueryFilter]:
+    filters, _ = _resolve_filters_with_unresolved(question, df)
+    return filters
+
+
+def _resolve_filters_with_unresolved(question: str, df: pd.DataFrame) -> tuple[list[QueryFilter], list[str]]:
+    """Resolve filters and return (resolved_filters, unresolved_filter_terms).
+
+    unresolved_filter_terms contains location/entity phrases the user mentioned
+    (e.g. 'Tokyo', 'LA') that could not be matched to any column value.
+    """
     normalized = _normalize(question)
     filters: list[QueryFilter] = []
     location_columns = [column for column in [str(col) for col in df.columns] if column_by_markers([column], LOCATION_LIKE_MARKERS)]
     ordered_columns = location_columns + [str(col) for col in df.columns if str(col) not in set(location_columns)]
     resolved = resolve_categorical_value(question, df, preferred_columns=ordered_columns)
     if resolved:
-        return [QueryFilter(column=resolved.column, operator="equals", value=resolved.value, source=resolved.source)]
+        return [QueryFilter(column=resolved.column, operator="equals", value=resolved.value, source=resolved.source)], []
     for column in ordered_columns:
         if not pd.api.types.is_object_dtype(df[column]) and not pd.api.types.is_string_dtype(df[column]):
             continue
         values = df[column].dropna().astype(str).unique()
         for value in values:
             value_norm = _normalize(value)
-            if len(value_norm) >= 3 and value_norm in normalized:
+            if _normalized_phrase_in_question(value_norm, normalized):
                 filters.append(QueryFilter(column=str(column), operator="equals", value=str(value)))
                 break
-    return filters
+    if filters:
+        return filters, []
+    # --- Detect unresolved location/entity terms ---
+    unresolved = _extract_unresolved_filter_terms(question, location_columns, df)
+    return [], unresolved
+
+
+def _normalized_phrase_in_question(phrase: str, normalized_question: str) -> bool:
+    phrase_tokens = _clean_match_tokens(_normalize(phrase))
+    if not phrase_tokens or sum(len(token) for token in phrase_tokens) < 3:
+        return False
+    question_tokens = _clean_match_tokens(normalized_question)
+    width = len(phrase_tokens)
+    return any(question_tokens[idx : idx + width] == phrase_tokens for idx in range(0, len(question_tokens) - width + 1))
+
+
+def _clean_match_tokens(value: str) -> list[str]:
+    return [token.strip("`'\".,:;!?()[]{}") for token in str(value or "").casefold().split() if token.strip("`'\".,:;!?()[]{}")]
+
+
+def _extract_unresolved_filter_terms(question: str, location_columns: list[str], df: pd.DataFrame) -> list[str]:
+    """Extract location/entity terms the user mentioned but that don't exist in the data."""
+    normalized = _normalize(question)
+    unresolved: list[str] = []
+    skip_words = {'the', 'a', 'an', 'each', 'every', 'all', 'this', 'that', 'my', 'our',
+                  'dataset', 'data', 'order', 'ascending', 'descending'}
+    col_names_norm = {_normalize(str(c)) for c in df.columns}
+    for prep in ('in', 'for', 'from', 'at'):
+        pattern = rf'\b{prep}\s+(\S+(?:\s+\S+){{0,2}})'
+        for m in re.finditer(pattern, normalized):
+            candidate = m.group(1).strip()
+            if candidate in col_names_norm or candidate in skip_words or len(candidate) < 2:
+                continue
+            if location_columns:
+                found_in_any = False
+                for col in location_columns:
+                    if col in df.columns:
+                        col_values = set(df[col].dropna().astype(str).str.casefold())
+                        if candidate in col_values:
+                            found_in_any = True
+                            break
+                if not found_in_any:
+                    # Find the original-cased word from the question
+                    original = _find_original_word(question, candidate)
+                    unresolved.append(original)
+                    break
+    return unresolved
+
+
+def _find_original_word(question: str, normalized_word: str) -> str:
+    """Find the original-cased version of a normalized word in the question."""
+    for word in question.split():
+        if _normalize(word) == normalized_word:
+            return word
+    return normalized_word
 
 
 def _resolve_time_axis(normalized: str, columns: list[str]) -> str | None:
@@ -562,10 +715,6 @@ class AggregationIntentResolver:
         if chart_type == "histogram":
             return "distribution", "distribution"
         return None, None
-
-
-def _resolve_aggregation(normalized: str, intent: str, chart_type: str | None) -> tuple[str | None, str | None]:
-    return AggregationIntentResolver.resolve(normalized, intent, chart_type)
 
 
 def _resolve_time_grain(normalized: str, intent: str) -> str | None:
@@ -688,10 +837,6 @@ def _is_numeric_like(column: str) -> bool:
 def _is_time_like_name(column: str) -> bool:
     low = _normalize(column)
     return any(marker in low for marker in ("date", "time", "timestamp", "дата", "время"))
-
-
-def _best_column_for_markers(columns: list[str], markers: tuple[str, ...]) -> str | None:
-    return column_by_markers(columns, markers)
 
 
 def _matched_question_phrase(normalized_question: str, markers: tuple[str, ...]) -> str | None:

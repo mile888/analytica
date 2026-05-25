@@ -82,6 +82,11 @@ export function BranchSwitcher({
                   <span className="mt-0.5 block truncate text-xs text-slate-500 dark:text-slate-400">
                     {branch.subtitle || branch.branch_type}
                   </span>
+                  {branch.dataset_ids?.length ? (
+                    <span className="mt-0.5 block truncate text-[11px] text-slate-400">
+                      Dataset: {branch.dataset_ids.join(", ")}
+                    </span>
+                  ) : null}
                 </span>
                 <span className={`mt-1 h-2 w-2 rounded-full ${branch.is_active ? "bg-blue-500" : "bg-slate-300 dark:bg-slate-700"}`} />
               </div>
@@ -97,13 +102,18 @@ export function BranchSwitcher({
   );
 }
 
-function branchTypeLabel(type: string): string {
+export function branchTypeLabel(type: string): string {
   const normalized = String(type || "").toLowerCase();
   if (normalized.includes("shipping")) return "Ship";
   if (normalized.includes("temporal")) return "Trend";
   if (normalized.includes("distribution")) return "Dist";
   if (normalized.includes("quality")) return "Quality";
   if (normalized.includes("hypothesis")) return "Hyp";
+  if (normalized.includes("customer")) return "Cust";
+  if (normalized.includes("business")) return "Biz";
+  if (normalized.includes("joinability")) return "Join";
+  if (normalized.includes("warehouse")) return "WH";
+  if (normalized.includes("multi_dataset")) return "Multi";
   if (normalized.includes("grouped")) return "Group";
   return "View";
 }

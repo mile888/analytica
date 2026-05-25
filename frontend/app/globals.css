@@ -159,3 +159,80 @@ a {
     box-shadow: none !important;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Mobile & Tablet Responsiveness
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Touch-friendly minimum tap targets */
+@media (max-width: 768px) {
+  button,
+  [role="button"],
+  a {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Stack investigation grid vertically */
+  .grid.xl\:grid-cols-\[320px_minmax\(0\,1fr\)_360px\] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Responsive chart containers */
+  .recharts-wrapper,
+  .chart-container,
+  svg.recharts-surface {
+    max-width: 100% !important;
+    overflow-x: auto;
+  }
+
+  /* Scrollable tables on mobile */
+  table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Prevent horizontal overflow */
+  pre, code {
+    max-width: 100%;
+    overflow-x: auto;
+    word-break: break-word;
+  }
+
+  /* Compact padding for cards */
+  .rounded-2xl {
+    border-radius: 1rem;
+  }
+
+  /* Better spacing for findings cards */
+  .space-y-4 > * + * {
+    margin-top: 0.75rem;
+  }
+}
+
+/* Tablet tweaks (768px - 1024px) */
+@media (min-width: 768px) and (max-width: 1024px) {
+  .grid.xl\:grid-cols-\[320px_minmax\(0\,1fr\)_360px\] {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Ensure charts and images never overflow their containers */
+img, svg, canvas, video {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Smooth scrolling for mobile */
+html {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+
+/* Prevent zoom on input focus (iOS) */
+@media (max-width: 768px) {
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+}

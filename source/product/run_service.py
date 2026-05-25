@@ -12,6 +12,16 @@ from source.product.conversation import (
 )
 from source.product.conversation_engine import answer_from_conversation_state, clarification_from_state, response_quality_gate
 from source.product.data_context import build_data_source_usage_context, usage_context_to_prompt
+from source.product.dataset_registry import (
+    DatasetResolutionResult,
+    DatasetScope,
+    build_investigation_dataset_registry,
+    clarification_output,
+    cross_dataset_output,
+    registry_prompt,
+    resolve_dataset_scope,
+    resolve_explicit_metric_dataset,
+)
 from source.product.execution_context import (
     ExecutionContextUnavailableError,
     execution_context_failure_output,
@@ -19,7 +29,7 @@ from source.product.execution_context import (
     resolve_dataset_runtime,
 )
 from source.product.analytical_graph import synthesize_transformation_change, transformation_from_payload
-from source.product.branch_workspace import BranchWorkspaceManager, activate_branch, upsert_branch_from_plan
+from source.product.branch_workspace import BranchWorkspaceManager, activate_branch, upsert_branch_for_intent, upsert_branch_from_plan
 from source.product.evidence_resolution import (
     BranchIdentity,
     build_active_target,
@@ -30,6 +40,9 @@ from source.product.evidence_resolution import (
 )
 from source.product.fallback_analysis import deterministic_investigation_fallback
 from source.product.language_policy import ResponseLanguagePolicy
+from source.product.llm_reasoning import sanitize_user_visible_text
+from source.product.non_analytical import non_analytical_output, sanitize_non_analytical_text
+from source.product.question_routing import ContextPolicy, decide_routing, should_ignore_active_branch
 from source.product.investigation import (
     InvestigationMessage,
     InvestigationMessageRole,
@@ -107,7 +120,34 @@ class InvestigationRunService:
                 active_message_id=message_id,
                 active_question=active_message.content if active_message else investigation.user_question,
             )
+            active_question = active_message.content if active_message else investigation.user_question
+            routing_decision = decide_routing(
+                active_question,
+                has_active_context=bool((conversation_context.get("conversation_state") or {}).get("active_branch_id") if isinstance(conversation_context, dict) else False),
+            )
+            conversation_context["routing_decision"] = routing_decision.to_payload()
+            if isinstance(conversation_context.get("conversation_state"), dict):
+                conversation_context["conversation_state"]["question_intent_type"] = routing_decision.question_intent_type.value
+                conversation_context["conversation_state"]["branch_action"] = routing_decision.branch_action.value
+            dataset_registry = build_investigation_dataset_registry(self.store, investigation, resolved_source_ids)
+            if not dataset_registry:
+                dataset_resolution = DatasetResolutionResult(
+                    DatasetScope.SINGLE,
+                    [],
+                    1.0,
+                    ["No product data source registry is attached; using legacy run context."],
+                )
+            else:
+                dataset_resolution = resolve_dataset_scope(
+                    question=active_question,
+                    registry=dataset_registry,
+                    conversation_context=conversation_context,
+                    user_selected_dataset_ids=_message_selected_dataset_ids(active_message),
+                )
+            run.metadata["dataset_resolution"] = dataset_resolution.to_dict()
+            run.metadata["dataset_registry"] = [entry.to_dict() for entry in dataset_registry]
             run.run_context_summary = _build_run_context_summary(usage_contexts, conversation_context)
+            run.run_context_summary["dataset_resolution"] = dataset_resolution.to_dict()
             self.store.update_investigation_run(run)
             self._emit(
                 run,
@@ -148,27 +188,145 @@ class InvestigationRunService:
             self._transition(run, InvestigationRunStatus.RUNNING, InvestigationRunStage.RUNNING_ANALYSIS)
             analysis_df = df
             execution_contexts: list[dict[str, Any]] = []
-            if analysis_df is None:
-                analysis_df, execution_contexts = self._load_dataframe_for_run(resolved_source_ids, run)
-            active_question = active_message.content if active_message else investigation.user_question
+            precomputed_output: dict[str, Any] | None = None
+            runtime_frames: dict[str, Any] = {}
+            if routing_decision.execution_mode == "conversational":
+                precomputed_output = non_analytical_output(
+                    active_question,
+                    routing_decision.question_intent_type,
+                    has_dataset_context=bool(resolved_source_ids),
+                )
+                self._emit(
+                    run,
+                    InvestigationRunEventType.INFO,
+                    "Handled as a non-analytical conversational request.",
+                    metadata=routing_decision.to_payload(),
+                )
+            elif dataset_resolution.scope == DatasetScope.AMBIGUOUS:
+                # --- GLOBAL EXPLICIT METRIC SEARCH ---
+                # Before asking for clarification, check if the user explicitly
+                # mentioned a metric that uniquely exists in one dataset.
+                # If so, override the ambiguous result and use that dataset.
+                explicit_match = resolve_explicit_metric_dataset(active_question, dataset_registry)
+                if explicit_match:
+                    override_id, override_column = explicit_match
+                    dataset_resolution = DatasetResolutionResult(
+                        DatasetScope.SINGLE,
+                        [override_id],
+                        0.88,
+                        [f"Explicit metric `{override_column}` uniquely found in one dataset."],
+                        candidate_scores=dataset_resolution.candidate_scores,
+                    )
+                    run.metadata["dataset_resolution"] = dataset_resolution.to_dict()
+                    self._emit(
+                        run,
+                        InvestigationRunEventType.INFO,
+                        f"Resolved ambiguous scope via explicit metric `{override_column}`.",
+                        metadata={"override_dataset_id": override_id, "override_column": override_column},
+                    )
+                else:
+                    precomputed_output = clarification_output(active_question, dataset_resolution)
+                    self._emit(
+                        run,
+                        InvestigationRunEventType.WARNING,
+                        "Dataset choice is ambiguous; asking for clarification.",
+                        severity=InvestigationRunEventSeverity.WARNING,
+                        metadata=dataset_resolution.to_dict(),
+                    )
+            elif analysis_df is None:
+                if dataset_resolution.scope == DatasetScope.CROSS:
+                    runtime_frames, execution_contexts = self._load_dataframes_for_run(dataset_resolution.selected_dataset_ids, run)
+                    missing = [item for item in dataset_resolution.selected_dataset_ids if item not in runtime_frames]
+                    if missing:
+                        run.metadata["execution_context_failures"] = list(run.metadata.get("execution_context_failures") or [])
+                        first_failure = (run.metadata.get("execution_context_failures") or [{}])[0]
+                        precomputed_output = execution_context_failure_output(
+                            active_question,
+                            ExecutionContextUnavailableError(
+                                str(first_failure.get("message") or "Executable dataset rows are unavailable for one selected dataset."),
+                                data_source_id=str(first_failure.get("data_source_id") or missing[0]),
+                                reason=str(first_failure.get("reason") or "raw_rows_unavailable"),
+                            ),
+                        )
+                    else:
+                        prior_investigation = self.store.get_investigation(investigation_id)
+                        prior_finding_texts = [f.text for f in prior_investigation.findings[-20:]]
+                        precomputed_output = cross_dataset_output(
+                            question=active_question,
+                            registry=dataset_registry,
+                            frames=runtime_frames,
+                            result=dataset_resolution,
+                            prior_findings=prior_finding_texts,
+                        )
+                        trace = precomputed_output.get("trace_metadata") if isinstance(precomputed_output.get("trace_metadata"), dict) else {}
+                        if isinstance(trace.get("dataset_relationships"), dict):
+                            run.metadata["dataset_relationships"] = trace["dataset_relationships"]
+                            run.run_context_summary["dataset_relationships"] = trace["dataset_relationships"]
+                else:
+                    analysis_df, execution_contexts = self._load_dataframe_for_run(dataset_resolution.selected_dataset_ids, run)
+            # --- EXPLICIT METRIC DATASET OVERRIDE ---
+            # When a df was passed by the caller but the canonical resolver
+            # selected a specific dataset (explicit metric match), check
+            # whether the passed df actually contains the expected metric.
+            # If not, attempt to load the correct df from runtime store.
+            if analysis_df is not None and dataset_resolution.scope == DatasetScope.SINGLE and dataset_registry:
+                explicit_match = resolve_explicit_metric_dataset(active_question, dataset_registry)
+                if explicit_match:
+                    _override_id, override_column = explicit_match
+                    if hasattr(analysis_df, "columns") and override_column not in set(str(c) for c in analysis_df.columns):
+                        override_df, _ctx = self._load_dataframe_for_run([_override_id], run)
+                        if override_df is not None:
+                            analysis_df = override_df
+                            dataset_resolution = DatasetResolutionResult(
+                                DatasetScope.SINGLE,
+                                [_override_id],
+                                0.90,
+                                [f"Overrode caller-provided df: explicit metric `{override_column}` found in a different loaded dataset."],
+                                candidate_scores=dataset_resolution.candidate_scores,
+                            )
+                            run.metadata["dataset_resolution"] = dataset_resolution.to_dict()
+                            self._emit(
+                                run,
+                                InvestigationRunEventType.INFO,
+                                f"Switched to dataset containing explicit metric `{override_column}`.",
+                                metadata={"override_dataset_id": _override_id, "override_column": override_column},
+                            )
             updated = self.investigation_service.run_investigation(
                 investigation_id,
                 df=analysis_df,
                 data_context={
-                    "data_source_ids": resolved_source_ids,
+                    "data_source_ids": dataset_resolution.selected_dataset_ids or resolved_source_ids,
+                    "attached_data_source_ids": resolved_source_ids,
                     "product_run_id": run.run_id,
                     "active_question": active_question,
                     "active_message_id": message_id,
                     "analysis_mode": _normalize_analysis_mode(analysis_mode),
                     "conversation_context": conversation_context,
                     "data_source_usage_contexts": [_jsonable(context) for context in usage_contexts],
-                    "data_context_prompt": usage_context_to_prompt(usage_contexts),
+                    "data_context_prompt": usage_context_to_prompt(usage_contexts) + "\n\n" + registry_prompt(dataset_registry),
                     "execution_contexts": execution_contexts,
                     "execution_context_failures": list(run.metadata.get("execution_context_failures") or []),
+                    "dataset_registry": [entry.to_dict() for entry in dataset_registry],
+                    "dataset_resolution": dataset_resolution.to_dict(),
+                    "precomputed_output": precomputed_output,
                 },
             )
 
             self._transition(run, InvestigationRunStatus.RUNNING, InvestigationRunStage.VALIDATING_RESULTS)
+            latest_output = updated.runs[-1].output if getattr(updated, "runs", None) else {}
+            latest_trace = latest_output.get("trace_metadata") if isinstance(latest_output, dict) and isinstance(latest_output.get("trace_metadata"), dict) else {}
+            if latest_trace.get("dataset_execution_scopes"):
+                run.metadata["dataset_execution_scopes"] = latest_trace["dataset_execution_scopes"]
+                run.metadata["multi_dataset_lifecycle_trace"] = _multi_dataset_lifecycle_trace(
+                    question=active_question,
+                    dataset_registry=dataset_registry,
+                    dataset_resolution=dataset_resolution,
+                    routing_decision=routing_decision,
+                    trace_metadata=latest_trace,
+                    artifacts=getattr(updated, "artifacts", []) or [],
+                    findings=getattr(updated, "findings", []) or [],
+                    run_id=run.run_id,
+                )
             validation = validate_investigation_result(updated, run_id=run.run_id)
             run.run_context_summary["validation"] = validation
             run.artifact_ids = [artifact.artifact_id for artifact in updated.artifacts if artifact.run_id == run.run_id]
@@ -266,7 +424,22 @@ class InvestigationRunService:
             return self.store.get_investigation_run(run.run_id)
 
     def _load_dataframe_for_run(self, data_source_ids: list[str], run: InvestigationRun) -> tuple[Any, list[dict[str, Any]]]:
+        frames, contexts = self._load_dataframes_for_run(data_source_ids, run, stop_after_first=True)
+        if frames:
+            first_id = next(iter(frames))
+            return frames[first_id], contexts
+        return None, contexts
+
+    def _load_dataframes_for_run(
+        self,
+        data_source_ids: list[str],
+        run: InvestigationRun,
+        *,
+        stop_after_first: bool = False,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         failures: list[dict[str, Any]] = []
+        frames: dict[str, Any] = {}
+        execution_contexts: list[dict[str, Any]] = []
         for data_source_id in data_source_ids:
             try:
                 source = self.store.get_data_source(data_source_id)
@@ -296,10 +469,13 @@ class InvestigationRunService:
                     "columns": int(len(getattr(df, "columns", []))),
                 },
             )
-            return df, [execution_context.to_dict()]
+            frames[data_source_id] = df
+            execution_contexts.append(execution_context.to_dict())
+            if stop_after_first:
+                return frames, execution_contexts
         if failures:
             run.metadata["execution_context_failures"] = failures
-        return None, []
+        return frames, execution_contexts
 
     def _transition(
         self,
@@ -384,89 +560,99 @@ class InvestigationRunService:
                 return
             summary = _summarize_run_result(investigation)
             execution_context_error_summary = _is_execution_context_unavailable_summary(summary, investigation)
-            if df is not None and _looks_like_state_clarification(summary):
-                conversation_context = {}
-                if investigation is not None and isinstance(getattr(investigation, "metadata", None), dict):
-                    conversation_context = {
-                        "conversation_state": investigation.metadata.get("conversation_state") or {},
-                        "recent_artifacts": list(getattr(investigation, "artifacts", []) or []),
-                    }
-                deterministic = deterministic_investigation_fallback(
-                    question,
-                    df,
-                    data_context={"conversation_context": conversation_context},
-                )
-                deterministic_summary = _output_summary(deterministic)
-                if deterministic_summary:
-                    summary = deterministic_summary
-            previous_assistant = [
-                message
-                for message in messages
-                if message.role == InvestigationMessageRole.ASSISTANT
-                and not (active_message_id and message.metadata.get("response_to_message_id") == active_message_id)
-            ]
-            state_payload = {}
-            if investigation is not None and isinstance(getattr(investigation, "metadata", None), dict):
-                state_payload = investigation.metadata.get("conversation_state") or {}
-            if (
-                not execution_context_error_summary
-                and (not _is_chart_request(question))
-            ) and is_semantically_redundant_response(
-                summary,
-                [message.content for message in previous_assistant[-8:]],
-                state_payload,
-            ):
-                if not _is_self_sufficient_dataset_scan(question, summary):
-                    summary = _non_redundant_follow_up_response(question, investigation, summary, df=df)
-                    if is_semantically_redundant_response(
-                        summary,
-                        [message.content for message in previous_assistant[-8:]],
-                        state_payload,
-                    ):
-                        summary = _duplicate_follow_up_deepening(question, investigation, df=df) or summary
-            conversation_context = {}
-            if investigation is not None and isinstance(getattr(investigation, "metadata", None), dict):
-                conversation_context = {
-                    "conversation_state": state_payload,
-                    "recent_artifacts": list(getattr(investigation, "artifacts", []) or []),
-                }
-            valid, _reason = response_quality_gate(
-                question=question,
-                response_text=summary,
-                conversation_context=conversation_context,
-            )
-            if not valid and not execution_context_error_summary:
-                deterministic_summary = ""
-                if df is not None:
+            # ── Terminal Decision Guard ──
+            # If the latest run produced a terminal decision (e.g. semantic_incompatibility),
+            # skip ALL downstream processing. The terminal message is the final answer.
+            _is_terminal = bool(_extract_terminal_decision_from_runs(investigation))
+            if not _is_terminal:
+                if df is not None and _looks_like_state_clarification(summary):
+                    conversation_context = {}
+                    if investigation is not None and isinstance(getattr(investigation, "metadata", None), dict):
+                        conversation_context = {
+                            "conversation_state": investigation.metadata.get("conversation_state") or {},
+                            "recent_artifacts": list(getattr(investigation, "artifacts", []) or []),
+                        }
                     deterministic = deterministic_investigation_fallback(
                         question,
                         df,
                         data_context={"conversation_context": conversation_context},
                     )
                     deterministic_summary = _output_summary(deterministic)
-                if deterministic_summary:
-                    summary = deterministic_summary
-                else:
-                    engine_response = answer_from_conversation_state(
-                        question=question,
-                        conversation_context=conversation_context,
-                        recent_artifacts=list(getattr(investigation, "artifacts", []) or []) if investigation is not None else [],
-                    )
-                    if engine_response:
-                        summary = engine_response.text
-                    else:
-                        clarification = clarification_from_state(conversation_context)
-                        if clarification:
-                            summary = clarification.text
-            if df is not None and _looks_like_state_clarification(summary) and not execution_context_error_summary:
-                deterministic = deterministic_investigation_fallback(
-                    question,
-                    df,
-                    data_context={"conversation_context": conversation_context},
+                    if deterministic_summary:
+                        summary = deterministic_summary
+                previous_assistant = [
+                    message
+                    for message in messages
+                    if message.role == InvestigationMessageRole.ASSISTANT
+                    and not (active_message_id and message.metadata.get("response_to_message_id") == active_message_id)
+                ]
+                state_payload = {}
+                if investigation is not None and isinstance(getattr(investigation, "metadata", None), dict):
+                    state_payload = investigation.metadata.get("conversation_state") or {}
+                if (
+                    not execution_context_error_summary
+                    and (not _is_chart_request(question))
+                ) and is_semantically_redundant_response(
+                    summary,
+                    [message.content for message in previous_assistant[-8:]],
+                    state_payload,
+                ):
+                    if not _is_self_sufficient_dataset_scan(question, summary):
+                        summary = _non_redundant_follow_up_response(question, investigation, summary, df=df)
+                        if is_semantically_redundant_response(
+                            summary,
+                            [message.content for message in previous_assistant[-8:]],
+                            state_payload,
+                        ):
+                            summary = _duplicate_follow_up_deepening(question, investigation, df=df) or summary
+                conversation_context = {}
+                if investigation is not None and isinstance(getattr(investigation, "metadata", None), dict):
+                    conversation_context = {
+                        "conversation_state": state_payload,
+                        "recent_artifacts": list(getattr(investigation, "artifacts", []) or []),
+                    }
+                valid, _reason = response_quality_gate(
+                    question=question,
+                    response_text=summary,
+                    conversation_context=conversation_context,
                 )
-                deterministic_summary = _output_summary(deterministic)
-                if deterministic_summary:
-                    summary = deterministic_summary
+                if not valid and not execution_context_error_summary:
+                    deterministic_summary = ""
+                    if df is not None:
+                        deterministic = deterministic_investigation_fallback(
+                            question,
+                            df,
+                            data_context={"conversation_context": conversation_context},
+                        )
+                        deterministic_summary = _output_summary(deterministic)
+                    if deterministic_summary:
+                        summary = deterministic_summary
+                    else:
+                        engine_response = answer_from_conversation_state(
+                            question=question,
+                            conversation_context=conversation_context,
+                            recent_artifacts=list(getattr(investigation, "artifacts", []) or []) if investigation is not None else [],
+                        )
+                        if engine_response:
+                            summary = engine_response.text
+                        else:
+                            clarification = clarification_from_state(conversation_context)
+                            if clarification:
+                                summary = clarification.text
+                if df is not None and _looks_like_state_clarification(summary) and not execution_context_error_summary:
+                    deterministic = deterministic_investigation_fallback(
+                        question,
+                        df,
+                        data_context={"conversation_context": conversation_context},
+                    )
+                    deterministic_summary = _output_summary(deterministic)
+                    if deterministic_summary:
+                        summary = deterministic_summary
+            summary = sanitize_user_visible_text(summary)
+            routing_payload = (getattr(investigation, "metadata", {}) or {}).get("conversation_state") if investigation is not None else {}
+            question_intent = str((routing_payload or {}).get("question_intent_type") or "")
+            if question_intent:
+                summary = sanitize_non_analytical_text(summary, question, question_intent)
             self._add_run_summary_message(
                 investigation_id,
                 run_id,
@@ -563,6 +749,37 @@ def _build_run_context_summary(contexts: list[Any], conversation_context: dict[s
     }
 
 
+def _findings_relevant_to_question(findings_texts: list[str], question: str) -> list[str]:
+    """Filter previous findings to those sharing domain vocabulary with the current question.
+
+    Prevents stale semantic contamination (e.g., entertainment findings leaking into healthcare questions).
+    """
+    if not findings_texts or not question:
+        return findings_texts
+    q_tokens = set(question.lower().replace("`", "").split())
+    # Generic terms that don't indicate domain relevance
+    generic = {
+        "the", "a", "an", "is", "are", "was", "were", "of", "in", "to", "for", "by", "with",
+        "and", "or", "not", "on", "at", "from", "this", "that", "which", "what", "how",
+        "mean", "median", "average", "total", "count", "records", "rows", "across", "among",
+        "highest", "lowest", "top", "bottom", "most", "least", "between", "compare",
+        "analysis", "dataset", "data", "field", "column", "value", "values", "group",
+        "shows", "show", "than", "more", "less", "each", "per", "all", "no", "has", "have",
+        "be", "been", "can", "could", "would", "should", "may", "might", "it", "its",
+        "overall", "rate", "prevalence", "distribution", "gap", "difference",
+    }
+    q_domain = q_tokens - generic
+    if len(q_domain) < 2:
+        return findings_texts
+    relevant = []
+    for text in findings_texts:
+        f_tokens = set(text.lower().replace("`", "").split())
+        f_domain = f_tokens - generic
+        if q_domain & f_domain:
+            relevant.append(text)
+    return relevant if relevant else findings_texts[:2]
+
+
 def _build_conversation_context(
     store: InvestigationStore,
     investigation_id: str,
@@ -592,8 +809,15 @@ def _build_conversation_context(
     ]
     previous_state = investigation.metadata.get("conversation_state") if isinstance(investigation.metadata, dict) else {}
     active_branch_id = str(previous_state.get("active_branch_id") or "") if isinstance(previous_state, dict) else ""
+    has_prior_context = bool(active_branch_id or previous_state or list(getattr(investigation, "artifacts", []) or []))
+    routing_decision = decide_routing(active_question, has_active_context=has_prior_context)
+    context_policy = routing_decision.context_policy
+    reset_context = context_policy != ContextPolicy.CONTINUE
+    ignore_active_branch = should_ignore_active_branch(routing_decision.question_intent_type)
+    if reset_context:
+        active_branch_id = ""
     latest_report = investigation.report
-    latest_chart_context = _latest_chart_context(investigation.artifacts, active_branch_id=active_branch_id)
+    latest_chart_context = {} if reset_context else _latest_chart_context(investigation.artifacts, active_branch_id=active_branch_id)
     memory_payload = [
         {
             "memory_id": item.memory_id,
@@ -610,6 +834,7 @@ def _build_conversation_context(
         for finding in investigation.findings[-5:]
         if getattr(finding, "status", None) != "rejected"
     ]
+    context_findings = [] if context_policy in {ContextPolicy.RESET_GLOBAL, ContextPolicy.CONVERSATIONAL} else _findings_relevant_to_question(latest_findings, active_question)
     artifact_titles = [
         artifact.title
         for artifact in investigation.artifacts[-8:]
@@ -620,25 +845,25 @@ def _build_conversation_context(
             "initial_question": investigation.user_question,
             "messages": compact_messages,
             "memory": memory_payload,
-            "latest_findings": latest_findings,
+            "latest_findings": context_findings,
             "latest_chart_context": latest_chart_context,
             "artifact_titles": artifact_titles,
         }
     )
     resolved_intent = resolve_user_intent(
         active_question,
-        has_active_context=bool(latest_chart_context or latest_findings or previous_state),
+        has_active_context=bool(latest_chart_context or context_findings or (previous_state if context_policy == ContextPolicy.CONTINUE else {})),
     )
     conversation_state = build_conversation_state(
-        previous=previous_state if isinstance(previous_state, dict) else {},
+        previous=_previous_state_for_policy(previous_state, context_policy),
         question=active_question,
         intent=resolved_intent,
         latest_chart_context=latest_chart_context,
-        latest_findings=latest_findings,
+        latest_findings=context_findings,
         latest_evidence=[
             getattr(artifact, "title", "")
             for artifact in investigation.artifacts[-8:]
-            if getattr(artifact, "visibility", None) != "hidden" and getattr(artifact, "title", "")
+            if context_policy == ContextPolicy.CONTINUE and getattr(artifact, "visibility", None) != "hidden" and getattr(artifact, "title", "")
         ],
         unresolved_questions=[
             item["content"]
@@ -647,7 +872,21 @@ def _build_conversation_context(
         ],
     )
     conversation_state_payload = conversation_state.to_payload()
-    if isinstance(previous_state, dict):
+    conversation_state_payload["question_intent_type"] = routing_decision.question_intent_type.value
+    conversation_state_payload["branch_action"] = routing_decision.branch_action.value
+    conversation_state_payload["context_policy"] = context_policy.value
+    _clear_state_for_policy(conversation_state_payload, context_policy)
+    if context_policy != ContextPolicy.CONTINUE:
+        for stale_key in (
+            "active_metric",
+            "active_dimension",
+            "active_time_axis",
+            "active_chart_type",
+            "active_analytical_target",
+            "active_hypothesis",
+        ):
+            conversation_state_payload.pop(stale_key, None)
+    if isinstance(previous_state, dict) and context_policy == ContextPolicy.CONTINUE:
         for sticky_key in (
             "active_transformation_result",
             "active_adjusted_ranking",
@@ -660,7 +899,11 @@ def _build_conversation_context(
         ):
             if sticky_key in previous_state and sticky_key not in conversation_state_payload:
                 conversation_state_payload[sticky_key] = previous_state.get(sticky_key)
-    if latest_chart_context.get("active_transformation_result"):
+    if isinstance(previous_state, dict) and context_policy not in {ContextPolicy.RESET_GLOBAL, ContextPolicy.CONVERSATIONAL}:
+        for schema_key in ("derived_field", "derived_columns"):
+            if schema_key in previous_state and schema_key not in conversation_state_payload:
+                conversation_state_payload[schema_key] = previous_state.get(schema_key)
+    if context_policy == ContextPolicy.CONTINUE and latest_chart_context.get("active_transformation_result"):
         conversation_state_payload["active_transformation_result"] = latest_chart_context.get("active_transformation_result")
         conversation_state_payload["active_transformation"] = latest_chart_context.get("active_transformation") or conversation_state_payload.get("active_transformation", "")
         conversation_state_payload["active_adjusted_ranking"] = latest_chart_context.get("active_adjusted_ranking") or []
@@ -676,10 +919,11 @@ def _build_conversation_context(
             "is_compound": resolved_intent.is_compound,
             "requires_continuity": resolved_intent.requires_continuity,
         },
+        "routing_decision": routing_decision.to_payload(),
         "conversation_state": conversation_state_payload,
         "messages": compact_messages,
         "memory": memory_payload,
-        "latest_findings": latest_findings,
+        "latest_findings": context_findings,
         "latest_report_summary": _compact_text(latest_report.summary or latest_report.answer, 700)
         if latest_report
         else "",
@@ -723,6 +967,67 @@ def _thread_state_payload(thread_state: Any) -> dict[str, Any]:
     }
 
 
+RESET_ANALYTICAL_STATE_KEYS = {
+    "active_metric",
+    "active_dimension",
+    "active_time_axis",
+    "active_chart_type",
+    "active_artifact_id",
+    "active_chart",
+    "active_distribution_context",
+    "active_bin_context",
+    "active_topic",
+    "active_hypothesis",
+    "current_objective",
+    "latest_intent",
+    "active_branch_id",
+    "active_aggregation",
+    "active_filters",
+    "active_transformation_result",
+    "active_adjusted_ranking",
+    "active_transformation",
+    "active_ranking_scope",
+    "active_quality_issue",
+    "active_grouped_payload",
+    "active_distribution_state",
+    "active_artifact_grounding",
+    "active_histogram_state",
+    "active_comparison_state",
+    "stale_semantic_comparison_state",
+    "distribution_state",
+}
+
+
+RESET_GLOBAL_EXTRA_STATE_KEYS = {
+    "active_dataset_scope",
+    "active_dataset_id",
+    "active_dataset_ids",
+    "active_analytical_target",
+    "branch_identity",
+    "derived_field",
+    "derived_columns",
+    "branch_workspace",
+}
+
+
+def _previous_state_for_policy(previous_state: Any, context_policy: ContextPolicy) -> dict[str, Any]:
+    previous = dict(previous_state) if isinstance(previous_state, dict) else {}
+    if context_policy == ContextPolicy.CONTINUE:
+        return previous
+    _clear_state_for_policy(previous, context_policy)
+    return previous
+
+
+def _clear_state_for_policy(state: dict[str, Any], context_policy: ContextPolicy) -> None:
+    if context_policy == ContextPolicy.CONTINUE:
+        return
+    keys = set(RESET_ANALYTICAL_STATE_KEYS)
+    if context_policy in {ContextPolicy.RESET_GLOBAL, ContextPolicy.CONVERSATIONAL}:
+        keys.update(RESET_GLOBAL_EXTRA_STATE_KEYS)
+    for key in keys:
+        state.pop(key, None)
+
+
 def _latest_chart_context(artifacts: list[Any], active_branch_id: str = "") -> dict[str, Any]:
     ordered = list(artifacts or [])
     if active_branch_id:
@@ -757,6 +1062,9 @@ def _latest_chart_context(artifacts: list[Any], active_branch_id: str = "") -> d
         return {
             "artifact_id": getattr(artifact, "artifact_id", ""),
             "title": getattr(artifact, "title", ""),
+            "dataset_id": metadata.get("dataset_id") or nested_metadata.get("dataset_id") or "",
+            "dataset_ids": metadata.get("dataset_ids") or nested_metadata.get("dataset_ids") or [],
+            "dataset_scope": metadata.get("dataset_scope") or nested_metadata.get("dataset_scope") or "",
             "chart_type": chart_type,
             "metric": content.get("metric") or metadata.get("metric") or content.get("y"),
             "dimension": dimension,
@@ -860,6 +1168,20 @@ def _message_metadata_from_list(messages: list[InvestigationMessage], active_mes
     return {}
 
 
+def _message_selected_dataset_ids(message: InvestigationMessage | None) -> list[str]:
+    metadata = getattr(message, "metadata", {}) if message is not None else {}
+    if not isinstance(metadata, dict):
+        return []
+    values = metadata.get("dataset_ids") or metadata.get("data_source_ids") or []
+    if isinstance(values, str):
+        values = [values]
+    selected = [str(item) for item in values if str(item).strip()] if isinstance(values, list) else []
+    single = str(metadata.get("dataset_id") or metadata.get("data_source_id") or "").strip()
+    if single:
+        selected.insert(0, single)
+    return _unique_ids(selected)
+
+
 def _activate_branch_from_message_metadata(store: InvestigationStore, investigation_id: str, message: InvestigationMessage | None) -> None:
     metadata = getattr(message, "metadata", {}) if message is not None else {}
     if not isinstance(metadata, dict):
@@ -896,7 +1218,45 @@ def _summarize_run_result(investigation: Any) -> str:
         ]
         if chart_titles:
             return f"Chart evidence is available: {chart_titles[-1]}."
+    # ── Terminal decision check: extract from latest run output ──
+    # If the latest run has a terminal decision (e.g. semantic_incompatibility),
+    # return that message instead of generic "no evidence" fallback.
+    _terminal = _extract_terminal_decision_from_runs(investigation)
+    if _terminal:
+        return _terminal
     return "I do not have a fresh row-level result for this question yet. Anchor the next check to a metric, segment, trend, anomaly, chart, or evidence gap so the answer can stay tied to the investigation."
+
+
+def _extract_terminal_decision_from_runs(investigation: Any) -> str | None:
+    """Check latest runs for terminal decisions like semantic incompatibility.
+
+    When a compatibility check blocks execution, the run output contains
+    the refusal message but no report/findings/artifacts are stored.
+    This function extracts the terminal message directly from the run output.
+    """
+    runs = getattr(investigation, "runs", None) or []
+    if not runs:
+        return None
+    # Check the latest run(s) for terminal decisions
+    for run in reversed(runs[-3:]):
+        output = getattr(run, "output", None)
+        if not isinstance(output, dict):
+            continue
+        trace = output.get("trace_metadata") or {}
+        if not isinstance(trace, dict):
+            continue
+        analysis_type = str(trace.get("analysis_type") or "")
+        # Terminal decision types that should never be replaced with "no evidence"
+        if analysis_type in (
+            "semantic_incompatibility",
+            "hard_stop",
+            "hard_stop_missing_fields",
+            "insufficient_dataset_scope",
+        ):
+            summary = str(output.get("summary") or output.get("final_answer") or "").strip()
+            if summary:
+                return summary
+    return None
 
 
 def _is_execution_context_unavailable_summary(summary: str, investigation: Any | None = None) -> bool:
@@ -972,7 +1332,11 @@ def _analytical_summary_from_state(investigation: Any | None) -> str:
         artifact_type = getattr(getattr(artifact, "artifact_type", None), "value", getattr(artifact, "artifact_type", None))
         if artifact_type == "chart":
             title = getattr(artifact, "title", "") or "the latest chart"
-            return f"{title} is available as chart evidence. Use it to compare the strongest groups, check spread, and decide what needs validation next."
+            return f"{title} is available as chart evidence. Use it to compare the strongest groups, check whether the pattern is stable, and decide what needs validation next."
+    # Check runs for terminal decisions before falling back to generic message
+    _terminal = _extract_terminal_decision_from_runs(investigation)
+    if _terminal:
+        return _terminal
     return "I do not have a fresh row-level result for this question yet. The next useful check should stay tied to the current metric, segment, chart, anomaly, or evidence gap."
 
 
@@ -1019,6 +1383,9 @@ def _semantic_signature(value: str) -> str:
 def _non_redundant_follow_up_response(question: str, investigation: Any | None, repeated_summary: str, *, df: Any = None) -> str:
     if execution_required_for_question(question, df=df):
         return repeated_summary
+    routing_decision = decide_routing(question, has_active_context=True)
+    if should_ignore_active_branch(routing_decision.question_intent_type):
+        return repeated_summary
     chart_context = _latest_chart_context(list(getattr(investigation, "artifacts", []) or [])) if investigation is not None else {}
     metric = str(chart_context.get("metric") or "").strip()
     dimension = str(chart_context.get("dimension") or "").strip()
@@ -1057,14 +1424,13 @@ def _non_redundant_follow_up_response(question: str, investigation: Any | None, 
         if ranked_answer:
             return ranked_answer
         return (
-            f"The active comparison is still `{metric}` by `{dimension}`. "
-            f"The current evidence says the answer should be judged by the `{dimension}` groups that lead on `{metric}`, "
-            "then stress-tested against record volume, subgroup mix, outliers, and time stability."
+            f"The current evidence centers on `{metric}` by `{dimension}`. "
+            "A useful next check is to validate the leading groups with record volume, outliers, and time stability."
         )
     if latest_finding:
         return (
-            f"The analytical picture is unchanged: {latest_finding}. "
-            "The useful extension is a direct comparison, anomaly check, transformation, or validation tied to the same metric."
+            f"The strongest stored finding still points to this issue: {latest_finding}. "
+            "Next, run a direct comparison, anomaly check, transformation, or validation tied to the same metric."
         )
     return (
         "This follow-up needs a more specific analytical anchor before I can add a new conclusion. "
@@ -1117,7 +1483,7 @@ def _duplicate_repeat_answer(question: str, df: Any) -> str:
         return (
             f"The duplicate picture is unchanged: exact duplicate rows affect {duplicate_rows:,} rows "
             f"({duplicate_patterns:,} removable repeated row patterns).{order_note} "
-            "The useful extension is to check whether those duplicates concentrate in an active grouping or another relevant dimension from the current schema."
+            "Next, check whether those duplicates concentrate in the active grouping or another relevant schema dimension."
         )
     except Exception:
         return ""
@@ -1167,21 +1533,6 @@ def _transformed_ranking_follow_up_response(question: str, state: dict[str, Any]
         f"After filtering, the adjusted ranking for `{metric}` by `{dimension}` has these strongest groups: {', '.join(leaders)}. "
         "These are adjusted leaders, and the tiny-n groups still need a median plus minimum-sample check before they are treated as robust."
     )
-
-
-def _rank_shift_text(rows: list[dict[str, Any]], dimension: str) -> str:
-    return ", ".join(
-        f"`{row.get(dimension)}` rank #{int(_float_value(row.get('original_rank')))} -> #{int(_float_value(row.get('adjusted_rank')))} "
-        f"(avg {_float_value(row.get('original_mean')):.2f} -> {_float_value(row.get('adjusted_mean')):.2f})"
-        for row in rows
-    )
-
-
-def _float_value(value: Any) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return 0.0
 
 
 def _first_existing_key_dict(row: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -1384,10 +1735,6 @@ def _ranked_group_follow_up_response(
     )
 
 
-def _contains_cyrillic(value: str) -> bool:
-    return any("а" <= char.lower() <= "я" or char.lower() == "ё" for char in str(value or ""))
-
-
 def _ru_rows(count: int) -> str:
     if count % 10 == 1 and count % 100 != 11:
         suffix = "строке"
@@ -1448,8 +1795,18 @@ def _persist_conversation_state(
         ]
         previous = investigation.metadata.get("conversation_state") if isinstance(investigation.metadata, dict) else {}
         intent = resolve_user_intent(question, has_active_context=bool(latest_chart or latest_findings or previous))
+        routing_decision = decide_routing(question, has_active_context=bool(previous))
+        context_policy = routing_decision.context_policy
+        reset_context = context_policy != ContextPolicy.CONTINUE
+        ignore_active_branch = should_ignore_active_branch(routing_decision.question_intent_type)
+        if reset_context:
+            latest_chart = {}
+            latest_findings = []
+            latest_evidence = []
+        else:
+            latest_findings = _findings_relevant_to_question(latest_findings, question)
         state = build_conversation_state(
-            previous=previous if isinstance(previous, dict) else {},
+            previous=_previous_state_for_policy(previous, context_policy),
             question=question,
             intent=intent,
             latest_chart_context=latest_chart,
@@ -1461,6 +1818,8 @@ def _persist_conversation_state(
             (finding for finding in reversed(investigation.findings or []) if getattr(finding, "status", None) != "rejected"),
             None,
         )
+        if context_policy in {ContextPolicy.RESET_GLOBAL, ContextPolicy.CONVERSATIONAL}:
+            latest_finding_obj = None
         report_summary = ""
         trace_metadata: dict[str, Any] = {}
         if investigation.report:
@@ -1532,9 +1891,16 @@ def _persist_conversation_state(
             "last_run_id": run_id,
             "active_analytical_target": active_target,
             "branch_identity": branch_identity,
+            "question_intent_type": routing_decision.question_intent_type.value,
+            "branch_action": routing_decision.branch_action.value,
+            "context_policy": context_policy.value,
         }
+        _clear_state_for_policy(metadata["conversation_state"], context_policy)
         if latest_chart:
             metadata["conversation_state"]["active_artifact_id"] = latest_chart.get("artifact_id") or ""
+            metadata["conversation_state"]["active_dataset_id"] = latest_chart.get("dataset_id") or metadata["conversation_state"].get("active_dataset_id")
+            metadata["conversation_state"]["active_dataset_ids"] = latest_chart.get("dataset_ids") or metadata["conversation_state"].get("active_dataset_ids") or []
+            metadata["conversation_state"]["active_dataset_scope"] = latest_chart.get("dataset_scope") or metadata["conversation_state"].get("active_dataset_scope")
             metadata["conversation_state"]["active_metric"] = latest_chart.get("metric") or metadata["conversation_state"].get("active_metric")
             metadata["conversation_state"]["active_dimension"] = latest_chart.get("dimension") or metadata["conversation_state"].get("active_dimension")
             metadata["conversation_state"]["active_aggregation"] = latest_chart.get("aggregation") or metadata["conversation_state"].get("active_aggregation")
@@ -1548,10 +1914,10 @@ def _persist_conversation_state(
                     "filters": latest_chart.get("filters") or [],
                     "chart_type": latest_chart.get("chart_type") or "",
                 }
-        if isinstance(previous, dict) and previous.get("active_branch_id"):
+        if isinstance(previous, dict) and previous.get("active_branch_id") and context_policy == ContextPolicy.CONTINUE:
             metadata["conversation_state"]["active_branch_id"] = previous.get("active_branch_id")
             metadata["conversation_state"]["branch_workspace"] = previous.get("branch_workspace") or metadata.get("branch_workspace")
-        if isinstance(previous, dict):
+        if isinstance(previous, dict) and context_policy == ContextPolicy.CONTINUE:
             for sticky_key in (
                 "active_transformation_result",
                 "active_adjusted_ranking",
@@ -1567,24 +1933,70 @@ def _persist_conversation_state(
             metadata["conversation_state"]["active_quality_issue"] = trace_metadata.get("active_quality_issue")
         if isinstance(trace_metadata.get("derived_field"), dict):
             metadata["conversation_state"]["derived_field"] = trace_metadata.get("derived_field")
-        if isinstance(previous, dict) and isinstance(previous.get("derived_field"), dict) and "derived_field" not in metadata["conversation_state"]:
+        if context_policy == ContextPolicy.CONTINUE and isinstance(previous, dict) and isinstance(previous.get("derived_field"), dict) and "derived_field" not in metadata["conversation_state"]:
             metadata["conversation_state"]["derived_field"] = previous.get("derived_field")
         if isinstance(trace_metadata.get("derived_columns"), list):
             metadata["conversation_state"]["derived_columns"] = trace_metadata.get("derived_columns")
-        if isinstance(previous, dict) and isinstance(previous.get("derived_columns"), list) and "derived_columns" not in metadata["conversation_state"]:
+        if context_policy == ContextPolicy.CONTINUE and isinstance(previous, dict) and isinstance(previous.get("derived_columns"), list) and "derived_columns" not in metadata["conversation_state"]:
             metadata["conversation_state"]["derived_columns"] = previous.get("derived_columns")
+        if context_policy not in {ContextPolicy.RESET_GLOBAL, ContextPolicy.CONVERSATIONAL} and isinstance(previous, dict):
+            if isinstance(previous.get("derived_field"), dict) and "derived_field" not in metadata["conversation_state"]:
+                metadata["conversation_state"]["derived_field"] = previous.get("derived_field")
+            if isinstance(previous.get("derived_columns"), list) and "derived_columns" not in metadata["conversation_state"]:
+                metadata["conversation_state"]["derived_columns"] = previous.get("derived_columns")
         if isinstance(trace_metadata.get("distribution_state"), dict):
             metadata["conversation_state"]["distribution_state"] = trace_metadata.get("distribution_state")
-        if isinstance(previous, dict) and isinstance(previous.get("distribution_state"), dict) and "distribution_state" not in metadata["conversation_state"]:
+        if context_policy == ContextPolicy.CONTINUE and isinstance(previous, dict) and isinstance(previous.get("distribution_state"), dict) and "distribution_state" not in metadata["conversation_state"]:
             metadata["conversation_state"]["distribution_state"] = previous.get("distribution_state")
         plan_payload = trace_metadata.get("query_plan") if isinstance(trace_metadata.get("query_plan"), dict) else {}
         if plan_payload:
+            plan_payload = dict(plan_payload)
+            dataset_resolution = trace_metadata.get("dataset_resolution") if isinstance(trace_metadata.get("dataset_resolution"), dict) else {}
+            dataset_ids = dataset_resolution.get("selected_dataset_ids") if isinstance(dataset_resolution.get("selected_dataset_ids"), list) else trace_metadata.get("dataset_ids")
+            if dataset_ids:
+                plan_payload.setdefault("dataset_ids", dataset_ids)
+                plan_payload.setdefault("dataset_id", dataset_ids[0] if len(dataset_ids) == 1 else "")
+            plan_payload.setdefault("dataset_scope", dataset_resolution.get("scope") or trace_metadata.get("dataset_scope") or "")
             workspace = BranchWorkspaceManager.from_payload(metadata.get("branch_workspace"))
             workspace = upsert_branch_from_plan(
                 workspace,
                 plan_payload,
                 artifact_count=len(getattr(investigation, "artifacts", []) or []),
                 finding_count=len(getattr(investigation, "findings", []) or []),
+            )
+            metadata["branch_workspace"] = workspace.to_payload()
+            metadata["conversation_state"]["branch_workspace"] = workspace.to_payload()
+            metadata["conversation_state"]["active_branch_id"] = workspace.active_branch_id
+            if plan_payload.get("metric"):
+                metadata["conversation_state"]["active_metric"] = plan_payload.get("metric")
+            if plan_payload.get("dimension"):
+                metadata["conversation_state"]["active_dimension"] = plan_payload.get("dimension")
+            if plan_payload.get("time_axis"):
+                metadata["conversation_state"]["active_time_axis"] = plan_payload.get("time_axis")
+            if plan_payload.get("chart_type"):
+                metadata["conversation_state"]["active_chart_type"] = plan_payload.get("chart_type")
+            if plan_payload.get("aggregation"):
+                metadata["conversation_state"]["active_aggregation"] = plan_payload.get("aggregation")
+            if plan_payload.get("filters"):
+                metadata["conversation_state"]["active_filters"] = plan_payload.get("filters")
+            if plan_payload.get("dataset_scope"):
+                metadata["conversation_state"]["active_dataset_scope"] = plan_payload.get("dataset_scope")
+            if plan_payload.get("dataset_id"):
+                metadata["conversation_state"]["active_dataset_id"] = plan_payload.get("dataset_id")
+            if plan_payload.get("dataset_ids"):
+                metadata["conversation_state"]["active_dataset_ids"] = plan_payload.get("dataset_ids")
+        elif routing_decision.branch_action.value in {"global", "create"} and routing_decision.question_intent_type.value not in {"direct_analysis", "distribution_analysis", "transformation", "artifact_explanation"}:
+            dataset_resolution = trace_metadata.get("dataset_resolution") if isinstance(trace_metadata.get("dataset_resolution"), dict) else {}
+            dataset_ids = dataset_resolution.get("selected_dataset_ids") if isinstance(dataset_resolution.get("selected_dataset_ids"), list) else []
+            workspace = BranchWorkspaceManager.from_payload(metadata.get("branch_workspace"))
+            workspace = upsert_branch_for_intent(
+                workspace,
+                intent_type=routing_decision.question_intent_type.value,
+                dataset_scope=str(dataset_resolution.get("scope") or ""),
+                dataset_id=str(dataset_ids[0]) if len(dataset_ids) == 1 else "",
+                dataset_ids=dataset_ids,
+                created_from_query=question,
+                parent_branch_id=previous.get("active_branch_id") if isinstance(previous, dict) else None,
             )
             metadata["branch_workspace"] = workspace.to_payload()
             metadata["conversation_state"]["branch_workspace"] = workspace.to_payload()
@@ -1630,6 +2042,38 @@ def _compact_text(value: str | None, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _multi_dataset_lifecycle_trace(
+    *,
+    question: str,
+    dataset_registry: list[Any],
+    dataset_resolution: Any,
+    routing_decision: Any,
+    trace_metadata: dict[str, Any],
+    artifacts: list[Any],
+    findings: list[Any],
+    run_id: str,
+) -> list[dict[str, Any]]:
+    scopes = trace_metadata.get("dataset_execution_scopes") if isinstance(trace_metadata.get("dataset_execution_scopes"), list) else []
+    run_artifacts = [artifact for artifact in artifacts if getattr(artifact, "run_id", None) == run_id]
+    run_findings = [finding for finding in findings if getattr(finding, "run_id", None) == run_id]
+    return [
+        {"stage": "question", "question": question},
+        {"stage": "dataset_registry", "dataset_ids": [entry.dataset_id for entry in dataset_registry], "count": len(dataset_registry)},
+        {"stage": "dataset_semantic_profiles", "profiles": [{"dataset_id": entry.dataset_id, "roles": entry.semantic_profile.get("roles", [])[:8], "concepts": entry.semantic_profile.get("concepts", [])[:8]} for entry in dataset_registry]},
+        {"stage": "compatibility_scoring", "scores": {scope.get("dataset_id"): scope.get("compatibility_score") for scope in scopes if isinstance(scope, dict)}},
+        {"stage": "operation_classification", "operation": trace_metadata.get("operation"), "intent": getattr(getattr(routing_decision, "question_intent_type", None), "value", "")},
+        {"stage": "planner", "scope": getattr(dataset_resolution, "scope", ""), "selected_dataset_ids": list(getattr(dataset_resolution, "selected_dataset_ids", []) or [])},
+        {"stage": "dataset_routing", "branch_count": len(scopes), "branch_dataset_ids": [scope.get("dataset_id") for scope in scopes if isinstance(scope, dict)]},
+        {"stage": "role_assignment", "roles_by_dataset": {scope.get("dataset_id"): scope.get("semantic_roles") for scope in scopes if isinstance(scope, dict)}},
+        {"stage": "execution", "computed_result_counts": {scope.get("dataset_id"): len(scope.get("computed_results") or []) for scope in scopes if isinstance(scope, dict)}},
+        {"stage": "evidence_generation", "finding_counts": {scope.get("dataset_id"): len(scope.get("findings") or []) for scope in scopes if isinstance(scope, dict)}},
+        {"stage": "artifacts", "artifact_count": len(run_artifacts), "artifact_dataset_ids": [getattr(artifact, "metadata", {}).get("dataset_id") for artifact in run_artifacts]},
+        {"stage": "findings", "finding_count": len(run_findings)},
+        {"stage": "synthesis", "analysis_type": trace_metadata.get("analysis_type"), "dataset_ids": trace_metadata.get("dataset_ids") or []},
+        {"stage": "final_response", "branch_count": trace_metadata.get("branch_count"), "operation": trace_metadata.get("operation")},
+    ]
 
 
 def _unique_ids(values: list[str]) -> list[str]:

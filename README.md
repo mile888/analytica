@@ -1,120 +1,155 @@
-# Analytica Deep Agent
+# Analytica
 
-Analytica is an execution-first analytical investigation workspace for arbitrary tabular datasets. It lets a user upload data, ask analytical questions, get real computed results, review artifacts, continue analysis across branches, and turn evidence-backed findings into reports.
+Analytica is an AI data analysis workspace. It helps a user upload CSV files, ask questions in normal language, see charts, save findings, and build reports.
 
-The project is intentionally dataset-agnostic. Runtime logic must resolve metrics, dimensions, timestamps, filters, transformations, and relationships from the active schema/profile and executable rows. Dataset-specific column names and sample values belong only in tests or clearly marked examples.
+The agent does not guess numbers. It plans the analysis, then runs real deterministic calculations on the data.
 
-## Why It Is Useful
+## Quick Start
 
-Analytical assistants often understand intent but drift into generic narration when execution context is missing or a target cannot be resolved. Analytica is built to be honest about that boundary: executable questions either run against real rows and materialize artifacts, or return a clear limitation.
+```bash
+git clone <repository-url>
+cd analytica-deep-agent
+cp .env.example .env
+# Add your LLM API key in .env
+docker compose up --build
+```
 
-Core strengths:
+Open:
 
-- schema-driven metric, dimension, timestamp, and value resolution;
-- execution-context checks before dataframe analysis;
-- artifact-first answers for charts, tables, transformations, and reports;
-- branch-aware follow-ups that preserve analytical lineage;
-- no fake chart generation from profile-only metadata;
-- reviewable final reports and published report snapshots.
+- Frontend: http://localhost:3000
+- API docs: http://localhost:8000/docs
 
-## Main User Flow
+## What Analytica Does
 
-1. Upload or attach a CSV dataset through the API or frontend.
-2. Analytica profiles schema, stores execution metadata, and marks whether row-level execution is available.
-3. The user asks a question such as a ranking, aggregation, histogram, trend, comparison, transformation, or relationship test.
-4. The planner resolves intent and schema targets.
-5. Runtime resolution verifies that raw rows are available and loadable.
-6. The executor computes real results and creates grounded artifacts.
-7. Follow-up questions continue from the active branch or artifact when appropriate.
-8. Findings can be reviewed, promoted into a report, finalized, and published.
+Analytica lets you:
 
-## Architecture Overview
+- upload one or more CSV datasets;
+- ask questions in English or Russian;
+- get computed answers, not made-up answers;
+- create charts and tables;
+- compare datasets safely;
+- explain charts;
+- save important findings;
+- build and export reports.
 
-- `source/agent.py` builds the official DeepAgents SDK runtime.
-- `source/tools/analytics_tools.py` exposes controlled schema, Python, SQL, visualization, and report tools.
-- `source/product/execution_context.py` records dataset runtime availability and reconstructs executable dataframes from persistent storage.
-- `source/product/execution_planner.py` produces structured, schema-driven query plans.
-- `source/product/direct_query_executor.py` executes deterministic pandas analyses for resolved plans.
-- `source/product/branch_workspace.py` tracks branch identity and chart/report lineage.
-- `source/product/fallback_analysis.py` repairs failed/empty runner output without pretending execution happened.
-- `source/product/sqlite/` stores investigations, data sources, reports, artifacts, and runtime metadata.
-- `source/api/` exposes the FastAPI product backend.
-- `frontend/` provides the Next.js investigation workspace.
-- `pages/` and `app.py` provide a Streamlit demo client.
+Example questions:
 
-See [docs/architecture.md](docs/architecture.md) for a fuller map.
+- "Which cities have the highest total Sales?"
+- "Build a histogram of BMI."
+- "Which health indicators are most common?"
+- "Where is profit margin weakest?"
+- "Can these two datasets be joined?"
+- "Build a side-by-side visualization for two datasets."
 
-## Deep Agent Usage
+## Main Features
 
-Analytica uses `create_deep_agent` from the DeepAgents SDK with:
+| Feature | What it means |
+| --- | --- |
+| CSV upload | Upload datasets from the web app. |
+| Schema profiling | The backend detects columns, types, and sample values. |
+| Natural language analysis | The user asks questions without writing code. |
+| Deterministic execution | Pandas and SQL compute the real results. |
+| Explicit constraints | If the user says which metric or group to use, the agent keeps it. |
+| Business KPIs | The agent can compute profit margin, loss rate, discount sensitivity, and efficiency scores when the fields exist. |
+| Health and risk analysis | The agent can rank binary indicators, prevalence, and ordered-group risk. |
+| Multi-dataset analysis | Each dataset runs in its own branch, then the answer compares the branch evidence. |
+| Charts and tables | Ranking, distribution, trend, relationship, and comparison requests create artifacts. |
+| Reports | Findings and artifacts can be turned into a shareable report. |
 
-- typed runtime context via `AnalyticaContext`;
-- project skills from `source/skills/*/SKILL.md`;
-- analytical tools from `source/tools/analytics_tools.py`;
-- filesystem-backed artifacts and memory;
-- optional LangGraph checkpoint persistence.
+## How It Works
 
-DeepAgents handles model/tool orchestration, skill selection, virtual filesystem access, and conversation continuity. Analytica-specific code stays focused on deterministic data execution, artifact validation, product persistence, and report workflows.
+```text
+┌─────────────────────────────────────────────────────────┐
+│                    User Question                        │
+│           "Top cities by total Sales"                   │
+└──────────────────────┬──────────────────────────────────┘
+                       ▼
+              ┌────────────────┐
+              │ Intent Router  │  Understands the task
+              └───────┬────────┘
+                      ▼
+              ┌────────────────┐
+              │ Dataset Resolver│  Selects dataset(s)
+              └───────┬────────┘
+                      ▼
+              ┌────────────────┐
+              │ Semantic Plan   │  Locks metric, group, filters
+              └───────┬────────┘
+                      ▼
+              ┌────────────────┐
+              │ Validator       │  Checks columns and types
+              └───────┬────────┘
+                      ▼
+              ┌────────────────┐
+              │ Executor        │  Runs pandas / SQL
+              └───────┬────────┘
+                      ▼
+              ┌────────────────┐
+              │ Grounded Answer │  Uses computed evidence only
+              └───────┬────────┘
+                      ▼
+         ┌────────────┴────────────┐
+         ▼                         ▼
+┌─────────────────┐     ┌──────────────────┐
+│ Charts / Tables │     │ Key Findings     │
+└────────┬────────┘     └────────┬─────────┘
+         └────────────┬──────────┘
+                      ▼
+              ┌────────────────┐
+              │ Report Builder │
+              └────────────────┘
+```
 
-Analytica intentionally does not define custom subagents. Branches, reports, findings, and artifacts are product-layer state, not separate agents. This keeps execution-context safety, artifact grounding, and no-fake-analytics checks deterministic and testable.
+## Multi-Dataset Flow
 
-## Planner, Executor, Branches, And Artifacts
+```text
+User question
+  -> multi-dataset planner
+  -> one branch per dataset
+  -> deterministic branch calculations
+  -> evidence package per dataset
+  -> grounded comparison
+  -> critic checks
+```
 
-The planner resolves analytical intent into a structured plan: metric, dimension, filters, time axis, aggregation, transformation, chart type, and confirmation requirements. It does not silently substitute a requested target when the schema does not support it.
+Each branch keeps its own:
 
-Before execution, dataset runtime resolution verifies that raw rows exist and can be loaded. If execution is unavailable, Analytica returns an execution-context error and does not create placeholder artifacts.
+- dataset id;
+- metric and group fields;
+- derived KPIs;
+- computed rows;
+- charts and tables;
+- limitations.
 
-The direct executor computes grounded results with pandas. Artifacts are created only from computed rows, including validated histogram bins and comparison payloads.
-
-Branch state records active metric, dimension, aggregation, filters, chart type, parent artifact, and derived artifact metadata so follow-ups such as transformed-chart explanations bind to the correct lineage.
+This avoids mixing unrelated datasets.
 
 ## Setup
 
+### Requirements
+
+- Python 3.12+
+- Node.js 18+
+- Docker and Docker Compose
+
+### Docker
+
 ```bash
-make setup
-make update
 cp .env.example .env
+# Set GEMINI_API_KEY or another configured LLM provider key.
+docker compose up --build
 ```
 
-Configure an LLM provider in `.env` using the environment variable named in `llm_config.yaml`, for example:
+### Local Backend
 
 ```bash
-GEMINI_API_KEY="..."
-ANALYTICA_LLM_PROVIDER="gemini"
-```
-
-Useful local settings:
-
-```bash
-ANALYTICA_DEFAULT_DATA_PATH="data"
-ANALYTICA_ARTIFACT_DIR="artifacts"
-ANALYTICA_SQL_TABLE_NAME="data"
-ANALYTICA_CHECKPOINTER_TYPE="memory"
-```
-
-`ANALYTICA_DEFAULT_DATA_PATH` is only a local CLI/Streamlit convenience. The primary product flow is dataset upload through the API or frontend.
-
-## Run Backend
-
-FastAPI:
-
-```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
 uvicorn source.api.app:app --reload
 ```
 
-Streamlit demo:
-
-```bash
-streamlit run app.py
-```
-
-CLI:
-
-```bash
-python3 run.py --csv path/to/file.csv --query "Summarize this dataset and suggest analysis directions"
-```
-
-## Run Frontend
+### Local Frontend
 
 ```bash
 cd frontend
@@ -122,98 +157,149 @@ npm install
 npm run dev
 ```
 
-Open the local Next.js URL shown by the dev server. The frontend expects the FastAPI backend to be running.
+## How To Use The App
 
-## Docker Local Run
+1. Open the frontend.
+2. Upload a CSV dataset.
+3. Create an investigation.
+4. Ask a question.
+5. Review the chart or table.
+6. Ask follow-up questions.
+7. Save findings.
+8. Build a report.
+9. Export the report if needed.
 
-Analytica can run with a backend container, a frontend container, and named Docker volumes for local runtime data.
+## Testing
 
-```bash
-cp .env.example .env
-docker compose up --build
-```
-
-Open:
-
-- frontend: http://localhost:3000
-- backend API/docs: http://localhost:8000/docs
-- backend health check: http://localhost:8000/health
-
-Put provider keys such as `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `OPEN_API_TOKEN` in `.env` locally, or in the deployment provider's environment variable dashboard. Do not commit real keys.
-
-The compose setup mounts persistent volumes for:
-
-- backend runtime state: `/app/.analytica`
-- generated artifacts: `/app/artifacts`
-
-Stop containers with:
+Run backend tests:
 
 ```bash
-docker compose down
+python3 -m compileall source/
+python3 -m pytest -q -m "not integration"
 ```
 
-Clear local Docker runtime state only when you intentionally want a fresh workspace:
-
-```bash
-docker compose down -v
-```
-
-Server-side frontend requests use `INTERNAL_API_URL`. In Docker Compose this should be `http://backend:8000` because the frontend container reaches the backend by service name. Browser-facing requests use `NEXT_PUBLIC_API_URL`; for local Docker it should stay `http://localhost:8000`. The backend CORS allowlist is controlled by `ANALYTICA_CORS_ORIGINS`.
-
-## Deploy To Render Or Railway
-
-For Render:
-
-1. Create a backend web service from this repository using `Dockerfile.backend`.
-2. Set the backend start port with `PORT`; the Dockerfile starts `uvicorn source.api.app:app` on `0.0.0.0`.
-3. Add provider keys and Analytica variables in the Render dashboard.
-4. Configure a persistent disk mounted at `/app/.analytica` if uploaded datasets and runtime state must survive restarts.
-5. Create a frontend web service using `frontend/Dockerfile`.
-6. Set `NEXT_PUBLIC_API_URL` to the public backend URL, set `INTERNAL_API_URL` to the backend service URL when the platform provides one, and set `ANALYTICA_CORS_ORIGINS` on the backend to include the public frontend URL.
-
-For Railway:
-
-1. Create a project from the GitHub repository.
-2. Add separate backend and frontend services, pointing them at `Dockerfile.backend` and `frontend/Dockerfile`.
-3. Set service variables for model provider keys, `INTERNAL_API_URL`, `NEXT_PUBLIC_API_URL`, and `ANALYTICA_CORS_ORIGINS`.
-4. Generate public domains for both services.
-5. Use a Railway volume for `/app/.analytica` if runtime uploads should persist.
-
-No Kubernetes, reverse proxy, or custom domain is required for the simple coursework deployment.
-
-## Tests And Checks
-
-Backend:
-
-```bash
-python3 -m compileall .
-python3 -m pytest -q
-```
-
-Frontend:
+Run frontend tests:
 
 ```bash
 cd frontend
-npm run typecheck
 npm test -- --run
 npm run build
 ```
 
-Notebook files are intentionally excluded from cleanup and should not be modified during repository maintenance.
+Run Docker build:
 
-## Demo Script
+```bash
+docker compose build
+```
 
-1. Start the backend with `uvicorn source.api.app:app --reload`.
-2. Start the frontend with `cd frontend && npm run dev`.
-3. Upload a CSV dataset.
-4. Ask for a grouped ranking, a histogram, and a temporal trend.
-5. Ask a transformation follow-up such as removing outliers.
-6. Explain the adjusted chart and inspect the generated artifacts.
-7. Promote findings into a report and finalize a published snapshot.
+Validate the evaluation notebook:
+
+```bash
+python3 -m json.tool notebooks/evaluation_metrics.ipynb > /dev/null
+```
+
+## Evaluation
+
+The evaluation notebook is here:
+
+```text
+notebooks/evaluation_metrics.ipynb
+```
+
+It checks:
+
+- end-to-end success;
+- analytical correctness;
+- chart creation;
+- multi-dataset reasoning;
+- refusal behavior;
+- follow-up behavior.
+
+See also [docs/evaluation.md](docs/evaluation.md).
+
+## Project Structure
+
+```text
+analytica-deep-agent/
+├── README.md
+├── docker-compose.yml
+├── Dockerfile.backend
+├── requirements.txt
+├── pyproject.toml
+├── llm_config.yaml
+│
+├── source/
+│   ├── api/                      FastAPI app and routes
+│   ├── llm/                      LLM provider setup
+│   ├── product/                  Core product logic
+│   │   ├── fallback_analysis.py  Deterministic analysis routes
+│   │   ├── llm_semantic_planner.py
+│   │   ├── business_semantic_planner.py
+│   │   ├── dataset_registry.py
+│   │   ├── cross_dataset_synthesis.py
+│   │   ├── plan_executor.py
+│   │   ├── plan_validator.py
+│   │   └── sqlite/
+│   ├── skills/                   Agent skill prompts
+│   └── tools/                    Agent tools
+│
+├── frontend/
+│   ├── app/                      Next.js pages and routes
+│   ├── components/               React components
+│   └── lib/                      API and UI helpers
+│
+├── tests/                        Backend tests
+├── docs/                         Project documentation
+└── notebooks/
+    └── evaluation_metrics.ipynb
+```
+
+## Architecture Notes
+
+For more detail, read [docs/architecture.md](docs/architecture.md).
+
+Important rules:
+
+- The LLM may plan and explain.
+- The LLM must not invent numbers.
+- The executor computes all statistics.
+- Validators check columns, types, and locked constraints.
+- Critics reject ungrounded or incompatible answers.
+- Multi-dataset answers must use branch evidence.
+- If the data cannot support a request, the agent gives a clear limitation.
 
 ## Known Limitations
 
-- External warehouse/database connections are not exposed; SQL is scoped to the active dataframe.
-- Relationship analysis computes requested numeric pairs and simple time-based growth; causal interpretation remains out of scope.
-- Semantic aliases are generic and schema-validated, but ambiguous business vocabulary may still require user confirmation.
-- Streamlit is retained as a demo client; the primary product surface is FastAPI plus Next.js.
+- CSV files are the main supported input.
+- Very large files may need sampling or more memory.
+- Correlation is not causation.
+- Some unclear questions may need a follow-up clarification.
+- Cross-dataset row-level joins only work when safe shared keys exist.
+- LLM wording can vary, but computed results should stay stable.
+
+## Mobile And Demo Access
+
+The frontend is responsive. To test on a phone on the same Wi-Fi:
+
+```bash
+docker compose up --build
+ipconfig getifaddr en0
+```
+
+Then open:
+
+```text
+http://<your-local-ip>:3000
+```
+
+## Future Work
+
+- More chart types.
+- Larger dataset support.
+- Direct database connections.
+- Shared team workspaces.
+- More report templates.
+
+## Author
+
+Analytica was built as a research project about AI-assisted data investigation.

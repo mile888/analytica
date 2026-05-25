@@ -329,7 +329,7 @@ def _duplicate_impact_response(question: str, df: pd.DataFrame, metric_col: str 
         if language.is_russian
         else [
             f"Compare group counts before and after deduplication{f' by `{dimension_col}`' if dimension_col else ''}.",
-            f"Check whether duplicates change totals for `{metric_col}`." if metric_col else "Check whether duplicates change totals for the main metric.",
+            f"Check whether duplicates change totals for `{metric_col}`." if metric_col else "Check whether duplicates change totals for the primary numeric column.",
         ]
     )
     return _output(
@@ -375,7 +375,7 @@ def _quality_issue_impact_response(question: str, df: pd.DataFrame, metric_col: 
         )
     elif metric_col and metric_missing:
         summary = (
-            f"Missing values in `{metric_col}` are the strongest risk for the current conclusion: {metric_missing:,} rows lack the main metric, "
+            f"Missing values in `{metric_col}` are the strongest risk for the current conclusion: {metric_missing:,} rows lack `{metric_col}`, "
             "which can bias averages, rankings, and outlier checks."
         )
     elif dimension_col and dimension_missing:

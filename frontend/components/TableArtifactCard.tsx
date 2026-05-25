@@ -1,12 +1,44 @@
 "use client";
 
+import { useRouter } from "next/navigation";
+import { useState } from "react";
 import type { Artifact } from "@/lib/api";
+import { selectArtifactForReport } from "@/lib/api";
+import { useToast } from "@/components/ToastProvider";
 
-export function TableArtifactCard({ artifact, compact = false }: { artifact: Artifact; compact?: boolean }) {
+export function TableArtifactCard({
+  artifact,
+  investigationId,
+  compact = false,
+  datasetLabel = ""
+}: {
+  artifact: Artifact;
+  investigationId: string;
+  compact?: boolean;
+  datasetLabel?: string;
+}) {
   const rows = tableRows(artifact);
+  const router = useRouter();
+  const { showToast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const [selectedForReport, setSelectedForReport] = useState(Boolean(artifact.metadata?.selected_for_report || artifact.metadata?.use_in_report));
   if (!rows.length) return null;
   const columns = tableColumns(rows).slice(0, compact ? 5 : 8);
   const visibleRows = rows.slice(0, compact ? 4 : 5);
+
+  async function useInReport() {
+    setBusy(true);
+    try {
+      await selectArtifactForReport(investigationId, artifact.artifact_id, true);
+      setSelectedForReport(true);
+      showToast("Table added to the next report update", "success");
+      router.refresh();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not add table to report", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <article className={`rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950 ${compact ? "p-3" : "p-4"}`}>
@@ -14,6 +46,7 @@ export function TableArtifactCard({ artifact, compact = false }: { artifact: Art
         <div className="min-w-0">
           <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-300">Table</div>
           <h3 className="mt-1 line-clamp-2 text-sm font-semibold text-slate-950 dark:text-slate-50">{artifact.title || "Table preview"}</h3>
+          {datasetLabel ? <div className="mt-1 text-[11px] font-medium text-slate-400">{datasetLabel}</div> : null}
         </div>
         <span className="shrink-0 rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500 dark:bg-slate-900 dark:text-slate-400">
           {rows.length} rows
@@ -42,6 +75,16 @@ export function TableArtifactCard({ artifact, compact = false }: { artifact: Art
             </tbody>
           </table>
         </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={useInReport}
+          disabled={busy}
+          className="rounded-full bg-slate-950 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-white"
+        >
+          {busy ? "Adding..." : selectedForReport ? "In report" : "Use in report"}
+        </button>
       </div>
     </article>
   );

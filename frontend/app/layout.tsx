@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { AppShell } from "@/components/AppShell";
 import { ThemeProvider } from "@/components/ThemeProvider";
@@ -7,7 +7,13 @@ import { listInvestigations } from "@/lib/api";
 
 export const metadata: Metadata = {
   title: "Analytica Decision Workspace",
-  description: "Thin Next.js shell for the Analytica product backend"
+  description: "AI-powered analytical investigation workspace — natural-language data analysis, charts, and reports"
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
 };
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {

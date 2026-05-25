@@ -9,7 +9,7 @@ from source.product.data_sources import (
     DataSourceUsageContext,
 )
 from source.product.cross_investigation import CrossInvestigationPattern, ReusableHypothesis, pattern_aware_suggestions
-from source.product.language_policy import DetectedLanguage, ResponseLanguagePolicy
+from source.product.language_policy import DetectedLanguage
 from source.product.semantic_layer import build_semantic_dataset_profile
 from source.product.semantic_layer import InvestigationThreadState
 

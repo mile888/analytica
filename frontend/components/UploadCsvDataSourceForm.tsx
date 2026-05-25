@@ -63,15 +63,32 @@ export function UploadCsvDataSourceForm() {
       </form>
       {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
       {created ? (
-        <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+        <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
           <p>
             Uploaded. <Link className="underline" href={`/data-sources/${created.data_source.data_source_id}`}>Open dataset</Link>
           </p>
-          <p className="mt-1 text-xs">
-            Profile: {created.profile.row_count} rows, {created.profile.column_count} columns.
-          </p>
+          {created.profile ? (
+            <p className="mt-1 text-xs">
+              Profile: {created.profile.row_count} rows, {created.profile.column_count} columns.
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+              Dataset saved, but profiling could not complete. The dataset is still usable.
+            </p>
+          )}
+          {created.warnings && created.warnings.length > 0 ? (
+            <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+              <p className="font-medium">Warnings:</p>
+              <ul className="ml-3 mt-1 list-disc">
+                {created.warnings.map((warning, index) => (
+                  <li key={index}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       ) : null}
+
     </Card>
   );
 }

@@ -21,7 +21,8 @@ def _correlation_strength(value: float) -> str:
     return "very weak"
 
 
-def _outlier_response(question: str, df: pd.DataFrame, metric_col: str) -> dict[str, Any]:
+def _outlier_response(question: str, df: pd.DataFrame, metric_col: str, *, original_name: str | None = None) -> dict[str, Any]:
+    display_name = original_name or metric_col
     series = pd.to_numeric(df[metric_col], errors="coerce").dropna()
     if series.empty:
         return _single_metric_response(question, df, metric_col)
@@ -34,43 +35,45 @@ def _outlier_response(question: str, df: pd.DataFrame, metric_col: str) -> dict[
     outliers = df.loc[mask].copy()
     outlier_count = int(mask.sum())
     share = outlier_count / max(int(series.count()), 1)
-    preview_cols = [str(col) for col in df.columns[:8]]
+    preview_cols = [str(col) for col in df.columns[:8] if not str(col).startswith("_parsed_")]
+    if not preview_cols:
+        preview_cols = [str(col) for col in df.columns[:8]]
     result_rows = outliers.sort_values(metric_col, ascending=False).head(25)[preview_cols].to_dict(orient="records")
     summary = (
-        f"`{metric_col}` has {outlier_count} possible outlier{'' if outlier_count == 1 else 's'} "
+        f"`{display_name}` has {outlier_count} possible outlier{'' if outlier_count == 1 else 's'} "
         f"({share:.1%} of non-null values). Values above {upper:.2f} or below {lower:.2f} deserve review. "
         "These extremes may represent rare meaningful cases, data entry issues, or mixed populations rather than ordinary variation."
     )
-    timeline = _timeline("outlier_check", metric_col=metric_col, outliers=outlier_count, rows=len(df))
+    timeline = _timeline("outlier_check", metric_col=display_name, outliers=outlier_count, rows=len(df))
     return _output(
         question=question,
         summary=summary,
         findings=[
             summary,
-            f"The central range for `{metric_col}` is roughly {q1:.2f} to {q3:.2f}; extreme values outside the IQR fence may drive averages.",
+            f"The central range for `{display_name}` is roughly {q1:.2f} to {q3:.2f}; extreme values outside the IQR fence may drive averages.",
             f"The evidence is stronger if the same outlier pattern appears inside a meaningful segment instead of only in isolated rows.",
         ],
-        evidence=[f"Used the IQR rule on `{metric_col}` across {int(series.count()):,} non-null values."],
+        evidence=[f"Used the IQR rule on `{display_name}` across {int(series.count()):,} non-null values."],
         limitations=["IQR flags unusual values statistically; domain review is needed before treating them as errors."],
         next_steps=[
-            f"Break down `{metric_col}` outliers by an important category to see where they concentrate.",
+            f"Break down `{display_name}` outliers by an important category to see where they concentrate.",
             "Compare mean and median to understand whether outliers are skewing the metric.",
             "Review the largest extreme rows before using average-based conclusions in a report.",
         ],
-        code=f"q1, q3 = df[{metric_col!r}].quantile([0.25, 0.75]); iqr = q3 - q1",
+        code=f"q1, q3 = df[{display_name!r}].quantile([0.25, 0.75]); iqr = q3 - q1",
         result_preview=pd.DataFrame(result_rows).to_string(index=False) if result_rows else "",
         timeline=timeline,
         artifacts=[
             {
                 "artifact_type": "table",
-                "title": f"{metric_col} outlier candidates",
+                "title": f"{display_name} outlier candidates",
                 "content": result_rows,
                 "visibility": "user",
                 "pinned": True,
-                "metadata": {"metric": metric_col, "lower_bound": lower, "upper_bound": upper, "outlier_count": outlier_count},
+                "metadata": {"metric": display_name, "lower_bound": lower, "upper_bound": upper, "outlier_count": outlier_count},
             }
         ] if result_rows else [],
-        trace_metadata={"fallback": "outlier_check", "metric": metric_col, "outlier_count": outlier_count},
+        trace_metadata={"fallback": "outlier_check", "metric": display_name, "outlier_count": outlier_count},
     )
 
 

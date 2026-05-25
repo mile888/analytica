@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Optional
 
+from source.config import SEMANTIC_PLANNER_MODE
 from source.product.adapter import agent_output_to_investigation_update
 from source.product.conversation_engine import answer_from_conversation_state, clarification_from_state, response_quality_gate
 from source.product.data_context import build_data_source_usage_context, usage_context_to_prompt
@@ -16,6 +18,7 @@ from source.product.execution_context import (
     execution_unavailable_in_context,
 )
 from source.product.fallback_analysis import deterministic_context_fallback, deterministic_investigation_fallback
+from source.product.grounding_critic import dataframe_operation_precedence_check, explicit_constraint_plan_check
 from source.product.investigation import (
     Artifact,
     ArtifactType,
@@ -26,7 +29,13 @@ from source.product.investigation import (
     new_id,
     utc_now,
 )
+from source.product.llm_reasoning import apply_llm_reasoning_layer, sanitize_user_visible_output
+from source.product.non_analytical import non_analytical_output, sanitize_non_analytical_text
+from source.product.question_routing import is_non_analytical_intent
+from source.product.compatibility_engine import check_question_dataset_compatibility, build_incompatibility_output
 from source.product.store import InvestigationStore
+
+_log = logging.getLogger(__name__)
 
 
 Runner = Callable[..., dict[str, Any]]
@@ -93,10 +102,18 @@ class InvestigationService:
                 run_context["data_source_usage_contexts"] = [_jsonable(context) for context in usage_contexts]
                 run_context["data_context_prompt"] = usage_context_to_prompt(usage_contexts)
             active_question = str(run_context.get("active_question") or investigation.user_question)
-            execution_required = execution_required_for_question(active_question, df=df, data_context=run_context)
-            execution_unavailable = execution_unavailable_in_context(run_context)
-            if execution_required and df is None and execution_unavailable:
-                run.output = execution_context_failure_output(active_question, _execution_error_from_context(run_context))
+            routing_payload = (run_context.get("conversation_context") or {}).get("routing_decision") if isinstance(run_context.get("conversation_context"), dict) else {}
+            question_intent = str((routing_payload or {}).get("question_intent_type") or "")
+            if is_non_analytical_intent(question_intent):
+                run.output = run_context.get("precomputed_output") if isinstance(run_context.get("precomputed_output"), dict) else non_analytical_output(
+                    active_question,
+                    question_intent,
+                    has_dataset_context=bool(data_source_ids),
+                )
+                text = sanitize_non_analytical_text(str(run.output.get("summary") or run.output.get("final_answer") or ""), active_question, question_intent)
+                run.output["summary"] = text
+                run.output["final_answer"] = text
+                _attach_dataset_resolution_to_output(run.output, run_context)
                 update = agent_output_to_investigation_update(run.output)
                 run.trace = update.trace
                 run.status = InvestigationStatus.NEEDS_REVIEW
@@ -108,12 +125,55 @@ class InvestigationService:
                     self.store.set_report(investigation_id, update.report)
                 self.store.update_status(investigation_id, InvestigationStatus.NEEDS_REVIEW)
                 return self.store.get_investigation(investigation_id)
-            output = self.runner(
+            execution_required = execution_required_for_question(active_question, df=df, data_context=run_context)
+            execution_unavailable = execution_unavailable_in_context(run_context)
+            if execution_required and df is None and execution_unavailable:
+                run.output = execution_context_failure_output(active_question, _execution_error_from_context(run_context))
+                _attach_dataset_resolution_to_output(run.output, run_context)
+                update = agent_output_to_investigation_update(run.output)
+                run.trace = update.trace
+                run.status = InvestigationStatus.NEEDS_REVIEW
+                run.finished_at = utc_now()
+                self.store.add_run(investigation_id, run)
+                if update.report:
+                    update.report.run_id = run.run_id
+                    update.report.question = update.report.question or active_question
+                    self.store.set_report(investigation_id, update.report)
+                self.store.update_status(investigation_id, InvestigationStatus.NEEDS_REVIEW)
+                return self.store.get_investigation(investigation_id)
+            # ── Semantic Compatibility Hard Stop (BEFORE any analysis) ──
+            # Must run BEFORE runner, fallback, planner, or any synthesis.
+            from source.product.compatibility_engine import enforce_question_dataset_compatibility
+            _compat_decision = enforce_question_dataset_compatibility(active_question, df, context=run_context)
+            if not _compat_decision.allowed:
+                _compat = check_question_dataset_compatibility(active_question, df)
+                if _compat and not _compat.compatible:
+                    run.output = build_incompatibility_output(active_question, _compat)
+                    _attach_dataset_resolution_to_output(run.output, run_context)
+                    update = agent_output_to_investigation_update(run.output)
+                    run.trace = update.trace
+                    run.status = InvestigationStatus.NEEDS_REVIEW
+                    run.finished_at = utc_now()
+                    self.store.add_run(investigation_id, run)
+                    # Store report so _summarize_run_result finds the incompatibility message
+                    if update.report:
+                        update.report.run_id = run.run_id
+                        update.report.question = update.report.question or active_question
+                        self.store.set_report(investigation_id, update.report)
+                    self.store.update_status(investigation_id, InvestigationStatus.NEEDS_REVIEW)
+                    return self.store.get_investigation(investigation_id)
+            output = run_context.get("precomputed_output") if isinstance(run_context.get("precomputed_output"), dict) else self.runner(
                 question=active_question,
                 df=df,
                 data_context=run_context,
             )
             run.output = output if isinstance(output, dict) else {"raw_output": output}
+            if isinstance(run_context.get("dataset_resolution"), dict):
+                run.output.setdefault("trace_metadata", {})
+                if isinstance(run.output["trace_metadata"], dict):
+                    run.output["trace_metadata"].setdefault("dataset_resolution", run_context["dataset_resolution"])
+                    run.output["trace_metadata"].setdefault("dataset_scope", run_context["dataset_resolution"].get("scope"))
+                    run.output["trace_metadata"].setdefault("dataset_ids", run_context["dataset_resolution"].get("selected_dataset_ids") or [])
             if not is_evidence_followup(active_question):
                 engine_answer = answer_from_conversation_state(
                     question=active_question,
@@ -125,6 +185,7 @@ class InvestigationService:
             if self._has_runner_error(run.output):
                 if execution_required and df is None and execution_unavailable:
                     run.output = execution_context_failure_output(active_question, _execution_error_from_context(run_context))
+                    _attach_dataset_resolution_to_output(run.output, run_context)
                     update = agent_output_to_investigation_update(run.output)
                     raise _ControlledExecutionContextFailure(update)
                 fallback = deterministic_investigation_fallback(active_question, df, data_context=run_context)
@@ -135,7 +196,21 @@ class InvestigationService:
                     run.output = fallback
                 else:
                     raise RuntimeError(str(run.output.get("exec_error") or "Investigation runner failed."))
-            if _should_prefer_deterministic_answer(active_question, df):
+            # ── LLM Semantic Planner (hybrid / llm_first mode) ──
+            # Only engage planner if the runner did not already produce a useful analytical answer.
+            _runner_answer = _answer_text_from_output(run.output)
+            _runner_already_useful = is_useful_analytical_answer(_runner_answer) and not self._has_runner_error(run.output)
+            if not _runner_already_useful:
+                planner_output = _try_semantic_planner(active_question, df, run_context)
+                if planner_output:
+                    planner_output["fallback_from"] = run.output
+                    run.output = planner_output
+                elif _should_prefer_deterministic_answer(active_question, df):
+                    deterministic = deterministic_investigation_fallback(active_question, df, data_context=run_context)
+                    if deterministic:
+                        deterministic["fallback_from"] = run.output
+                        run.output = deterministic
+            elif _should_prefer_deterministic_answer(active_question, df):
                 deterministic = deterministic_investigation_fallback(active_question, df, data_context=run_context)
                 if deterministic:
                     deterministic["fallback_from"] = run.output
@@ -143,6 +218,7 @@ class InvestigationService:
             if not is_useful_analytical_answer(_answer_text_from_output(run.output)):
                 if execution_required and df is None and execution_unavailable:
                     run.output = execution_context_failure_output(active_question, _execution_error_from_context(run_context))
+                    _attach_dataset_resolution_to_output(run.output, run_context)
                     update = agent_output_to_investigation_update(run.output)
                     raise _ControlledExecutionContextFailure(update)
                 fallback = deterministic_investigation_fallback(active_question, df, data_context=run_context)
@@ -153,18 +229,24 @@ class InvestigationService:
                     run.output = fallback
                 else:
                     run.output = _safe_no_answer_output(active_question, run_context)
+            _attach_dataset_resolution_to_output(run.output, run_context)
             update = agent_output_to_investigation_update(run.output)
-            if _should_replace_generic_overview(active_question, update, df):
+            # Guard: do not replace validated LLM planner output with deterministic overview
+            if not _is_semantic_planner_output(run.output) and _should_replace_generic_overview(active_question, update, df):
                 analytical_fallback = deterministic_investigation_fallback(active_question, df, data_context=run_context)
                 if analytical_fallback:
                     analytical_fallback["fallback_from"] = run.output
                     run.output = analytical_fallback
+                    _attach_dataset_resolution_to_output(run.output, run_context)
                     update = agent_output_to_investigation_update(run.output)
             valid, _quality_reason = response_quality_gate(
                 question=active_question,
                 response_text=_answer_text_from_output(run.output),
                 conversation_context=run_context.get("conversation_context") if isinstance(run_context, dict) else {},
             )
+            # Guard: do not let quality gate discard validated LLM planner output
+            if _is_semantic_planner_output(run.output):
+                valid = True
             if not valid:
                 engine_answer = None
                 if _is_transformation_impact_followup(active_question):
@@ -177,6 +259,7 @@ class InvestigationService:
                 if analytical_fallback:
                     analytical_fallback["fallback_from"] = run.output
                     run.output = analytical_fallback
+                    _attach_dataset_resolution_to_output(run.output, run_context)
                     update = agent_output_to_investigation_update(run.output)
                 else:
                     engine_answer = engine_answer or answer_from_conversation_state(
@@ -186,6 +269,7 @@ class InvestigationService:
                         )
                     if engine_answer:
                         run.output = _conversation_response_output(active_question, engine_answer)
+                        _attach_dataset_resolution_to_output(run.output, run_context)
                         update = agent_output_to_investigation_update(run.output)
                 fallback_valid, _ = response_quality_gate(
                     question=active_question,
@@ -198,17 +282,52 @@ class InvestigationService:
                     )
                     if clarification:
                         run.output = _conversation_response_output(active_question, clarification)
+                        _attach_dataset_resolution_to_output(run.output, run_context)
                         update = agent_output_to_investigation_update(run.output)
             if _is_chart_request(active_question) and not _update_has_chart(update):
                 if execution_required and df is None and execution_unavailable:
                     run.output = execution_context_failure_output(active_question, _execution_error_from_context(run_context))
+                    _attach_dataset_resolution_to_output(run.output, run_context)
                     update = agent_output_to_investigation_update(run.output)
                     raise _ControlledExecutionContextFailure(update)
                 chart_fallback = deterministic_investigation_fallback(active_question, df, data_context=run_context)
                 if chart_fallback:
                     chart_fallback["fallback_from"] = run.output
                     run.output = chart_fallback
+                    _attach_dataset_resolution_to_output(run.output, run_context)
                     update = agent_output_to_investigation_update(run.output)
+            # Guard: semantic planner output already has grounded synthesis + critic;
+            # do not apply old reasoning layer which injects ungrounded filler templates
+            if not _is_semantic_planner_output(run.output):
+                run.output = apply_llm_reasoning_layer(
+                    question=active_question,
+                    output=run.output,
+                    df=df,
+                    data_context=run_context,
+                )
+            precedence_issue = dataframe_operation_precedence_check(active_question, _answer_text_from_output(run.output))
+            if precedence_issue and df is not None:
+                analytical_fallback = deterministic_investigation_fallback(active_question, df, data_context=run_context)
+                if analytical_fallback:
+                    analytical_fallback["fallback_from"] = run.output
+                    analytical_fallback["critic_verdict"] = precedence_issue
+                    trace = analytical_fallback.setdefault("trace_metadata", {})
+                    if isinstance(trace, dict):
+                        trace["critic_reroute"] = "dataframe_operation_precedence"
+                    run.output = analytical_fallback
+            constraint_issue = explicit_constraint_plan_check(active_question, run.output, df)
+            if constraint_issue and df is not None:
+                analytical_fallback = deterministic_investigation_fallback(active_question, df, data_context=run_context)
+                if analytical_fallback:
+                    analytical_fallback["fallback_from"] = run.output
+                    analytical_fallback["critic_verdict"] = constraint_issue
+                    trace = analytical_fallback.setdefault("trace_metadata", {})
+                    if isinstance(trace, dict):
+                        trace["critic_reroute"] = "explicit_constraint_plan"
+                    run.output = analytical_fallback
+            run.output = sanitize_user_visible_output(run.output)
+            _attach_dataset_resolution_to_output(run.output, run_context)
+            update = agent_output_to_investigation_update(run.output)
             run.trace = update.trace
             run.status = InvestigationStatus.NEEDS_REVIEW
             run.finished_at = utc_now()
@@ -223,6 +342,8 @@ class InvestigationService:
                     artifact,
                     trace_metadata=trace_metadata,
                     message_id=(run_context or {}).get("active_message_id") if isinstance(run_context, dict) else None,
+                    dataset_resolution=(run_context or {}).get("dataset_resolution") if isinstance(run_context, dict) else None,
+                    created_from_query=active_question,
                 )
                 if artifact.metadata.get("transformation_type") and previous_chart_artifact_id:
                     if not artifact.metadata.get("parent_artifact_id"):
@@ -299,6 +420,18 @@ def _execution_error_from_context(context: dict[str, Any]) -> ExecutionContextUn
         "Executable dataset rows are unavailable. The saved schema/profile can be used for metadata reasoning only.",
         reason="raw_rows_unavailable",
     )
+
+
+def _attach_dataset_resolution_to_output(output: dict[str, Any], context: dict[str, Any]) -> None:
+    if not isinstance(output, dict) or not isinstance(context, dict) or not isinstance(context.get("dataset_resolution"), dict):
+        return
+    output.setdefault("trace_metadata", {})
+    if not isinstance(output.get("trace_metadata"), dict):
+        return
+    resolution = context["dataset_resolution"]
+    output["trace_metadata"].setdefault("dataset_resolution", resolution)
+    output["trace_metadata"].setdefault("dataset_scope", resolution.get("scope"))
+    output["trace_metadata"].setdefault("dataset_ids", resolution.get("selected_dataset_ids") or [])
 
 
 def _question_with_data_context(question: str, data_context: dict[str, Any]) -> str:
@@ -500,6 +633,14 @@ def _is_quality_request(question: str) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _is_semantic_planner_output(output: Any) -> bool:
+    """Check if output was produced by the LLM semantic planner pipeline."""
+    if not isinstance(output, dict):
+        return False
+    trace = output.get("trace_metadata")
+    return isinstance(trace, dict) and bool(trace.get("semantic_planner"))
+
+
 def _should_prefer_deterministic_answer(question: str, df: Any) -> bool:
     if df is None:
         return False
@@ -681,25 +822,23 @@ def _update_has_chart(update: Any) -> bool:
     return any(getattr(artifact, "artifact_type", None) == ArtifactType.CHART for artifact in getattr(update, "artifacts", []) or [])
 
 
-def _output_has_chart(output: dict[str, Any]) -> bool:
-    artifacts = output.get("artifacts")
-    if not isinstance(artifacts, list):
-        return False
-    for artifact in artifacts:
-        if not isinstance(artifact, dict):
-            continue
-        if str(artifact.get("artifact_type") or artifact.get("type") or "").lower() == "chart":
-            return True
-    return False
-
-
-def _enrich_artifact_metadata(artifact: Artifact, *, trace_metadata: dict[str, Any], message_id: str | None) -> dict[str, Any]:
+def _enrich_artifact_metadata(
+    artifact: Artifact,
+    *,
+    trace_metadata: dict[str, Any],
+    message_id: str | None,
+    dataset_resolution: Any = None,
+    created_from_query: str = "",
+) -> dict[str, Any]:
     metadata = dict(getattr(artifact, "metadata", {}) or {})
     nested_metadata = metadata.get("metadata") if isinstance(metadata.get("metadata"), dict) else {}
     content = getattr(artifact, "content", None)
     content_dict = content if isinstance(content, dict) else {}
     query_plan = metadata.get("query_plan") if isinstance(metadata.get("query_plan"), dict) else trace_metadata.get("query_plan") if isinstance(trace_metadata.get("query_plan"), dict) else {}
     branch_route = trace_metadata.get("branch_route") if isinstance(trace_metadata.get("branch_route"), dict) else {}
+    resolution = dataset_resolution if isinstance(dataset_resolution, dict) else trace_metadata.get("dataset_resolution") if isinstance(trace_metadata.get("dataset_resolution"), dict) else {}
+    selected_dataset_ids = list(resolution.get("selected_dataset_ids") or trace_metadata.get("dataset_ids") or metadata.get("dataset_ids") or [])
+    dataset_scope = str(resolution.get("scope") or trace_metadata.get("dataset_scope") or metadata.get("dataset_scope") or ("single_dataset" if len(selected_dataset_ids) == 1 else "cross_dataset" if len(selected_dataset_ids) > 1 else ""))
     metadata.setdefault("artifact_id", artifact.artifact_id)
     metadata.setdefault("branch_id", metadata.get("branch_id") or nested_metadata.get("branch_id") or trace_metadata.get("branch_id") or branch_route.get("branch_id") or "global")
     metadata.setdefault("branch_title", metadata.get("branch_title") or _artifact_branch_title(metadata, content_dict, query_plan))
@@ -708,6 +847,22 @@ def _enrich_artifact_metadata(artifact: Artifact, *, trace_metadata: dict[str, A
     metadata.setdefault("aggregation", metadata.get("aggregation") or nested_metadata.get("aggregation") or content_dict.get("aggregation") or query_plan.get("aggregation"))
     metadata.setdefault("filters", metadata.get("filters") or nested_metadata.get("filters") or content_dict.get("filters") or query_plan.get("filters") or [])
     metadata.setdefault("chart_type", metadata.get("chart_type") or nested_metadata.get("chart_type") or content_dict.get("chart_type"))
+    if selected_dataset_ids:
+        metadata.setdefault("dataset_ids", selected_dataset_ids)
+        metadata.setdefault("dataset_id", selected_dataset_ids[0] if len(selected_dataset_ids) == 1 else "")
+    if nested_metadata.get("dataset_id"):
+        metadata["dataset_id"] = nested_metadata.get("dataset_id")
+    if isinstance(nested_metadata.get("dataset_ids"), list) and nested_metadata.get("dataset_ids"):
+        metadata["dataset_ids"] = nested_metadata.get("dataset_ids")
+    if nested_metadata.get("dataset_name"):
+        metadata["dataset_name"] = nested_metadata.get("dataset_name")
+    if nested_metadata.get("dataset_scope"):
+        metadata["dataset_scope"] = nested_metadata.get("dataset_scope")
+    if nested_metadata.get("operation"):
+        metadata["operation"] = nested_metadata.get("operation")
+    if nested_metadata.get("question_id"):
+        metadata["question_id"] = nested_metadata.get("question_id")
+    metadata.setdefault("dataset_scope", dataset_scope or ("single_dataset" if metadata.get("dataset_id") else ""))
     metadata.setdefault("transformation_state", metadata.get("transformation_state") or nested_metadata.get("transformation_type") or nested_metadata.get("analysis_type") or query_plan.get("transformation") or trace_metadata.get("analysis_type") or "raw")
     for key in (
         "base_metric",
@@ -723,7 +878,7 @@ def _enrich_artifact_metadata(artifact: Artifact, *, trace_metadata: dict[str, A
         if key not in metadata and key in content_dict:
             metadata[key] = content_dict.get(key)
     metadata.setdefault("created_from_message_id", message_id or "")
-    metadata.setdefault("created_from_query", query_plan.get("raw_question") or "")
+    metadata.setdefault("created_from_query", created_from_query or query_plan.get("raw_question") or "")
     metadata.setdefault("created_at", artifact.created_at.isoformat())
     return metadata
 
@@ -762,3 +917,216 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
     return value
+
+
+# ── LLM Semantic Planner integration ────────────────────────────────────────
+
+def _try_semantic_planner(
+    question: str,
+    df: Any,
+    run_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Try LLM semantic planner → validate → execute → synthesize → critic.
+
+    Returns a full pipeline output dict if successful, or None to fall back
+    to the deterministic path.  Every failure is silently caught so the
+    existing system is never disrupted.
+    """
+    import pandas as pd
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+
+    mode = SEMANTIC_PLANNER_MODE
+    if mode == "deterministic_first":
+        return None
+
+    # In hybrid mode, old deterministic paths can handle simple exact-column
+    # lookups, but explicit metric/grouping/aggregation constraints need the
+    # semantic planner so the constraints are locked before fallback heuristics.
+    if mode == "hybrid" and _is_exact_column_query(question, df) and not _has_explicit_semantic_constraints(question, df):
+        return None
+
+    try:
+        from source.product.llm_semantic_planner import plan_analysis
+        from source.product.plan_validator import validate_plan, PlanRejection
+        from source.product.plan_executor import execute_plan
+        from source.product.grounded_synthesis import synthesize, mechanical_synthesis
+        from source.product.grounding_critic import validate_synthesis
+
+        # 1. LLM plans the analysis
+        conversation_context = run_context.get("conversation_context") if isinstance(run_context, dict) else {}
+        plan = plan_analysis(
+            question=question,
+            df=df,
+            context=conversation_context if isinstance(conversation_context, dict) else None,
+        )
+        if plan is None:
+            _log.debug("Semantic planner: LLM returned no plan, falling back")
+            return None
+        if plan.confidence < 0.3:
+            _log.debug("Semantic planner: low confidence (%.2f), falling back", plan.confidence)
+            return None
+
+        # 2. Validate the plan
+        validated = validate_plan(plan, df)
+        if isinstance(validated, PlanRejection):
+            _log.debug("Semantic planner: plan rejected: %s", validated.reasons)
+            return None
+
+        # 3. Execute deterministically
+        evidence = execute_plan(validated, df, question=question)
+
+        # 4. Synthesize answer from evidence
+        synthesis = synthesize(question, evidence)
+
+        # 5. Critic validates grounding
+        critic_result = validate_synthesis(synthesis, evidence)
+        if critic_result.has_critical_failures:
+            _log.debug("Semantic planner: critic found critical failures, using mechanical synthesis")
+            synthesis = mechanical_synthesis(question, evidence)
+
+        elif critic_result.cleaned_synthesis:
+            synthesis = critic_result.cleaned_synthesis
+
+        # 6. Build pipeline output compatible with adapter
+        return _build_semantic_planner_output(
+            question=question,
+            plan=plan,
+            validated=validated,
+            evidence=evidence,
+            synthesis=synthesis,
+            critic_result=critic_result,
+        )
+
+    except Exception as exc:
+        _log.debug("Semantic planner failed, falling back: %s", exc)
+        return None
+
+
+def _build_semantic_planner_output(
+    *,
+    question: str,
+    plan: Any,
+    validated: Any,
+    evidence: Any,
+    synthesis: Any,
+    critic_result: Any,
+) -> dict[str, Any]:
+    """Build output dict compatible with agent_output_to_investigation_update."""
+
+    # Convert synthesis findings to key_findings strings
+    key_findings = []
+    for finding in synthesis.findings:
+        if isinstance(finding, dict):
+            title = finding.get("title", "")
+            evidence_text = finding.get("evidence", "")
+            if title and evidence_text:
+                key_findings.append(f"{title}: {evidence_text}")
+            elif title:
+                key_findings.append(title)
+        else:
+            key_findings.append(str(finding))
+
+    # Build artifacts from evidence
+    artifacts = []
+    for art in evidence.artifacts:
+        if isinstance(art, dict):
+            artifacts.append(art)
+
+    timeline = [{
+        "tool": "semantic_planner",
+        "status": "ok",
+        "operation": plan.operation,
+        "confidence": plan.confidence,
+        "columns_used": evidence.columns_used,
+        "record_count": evidence.record_count,
+        "critic_passed": critic_result.passed,
+        "repairs": getattr(validated, "repairs", []),
+    }]
+
+    trace_metadata = {
+        "analysis_type": plan.operation.lower(),
+        "semantic_planner": True,
+        "planner_operation": plan.operation,
+        "planner_confidence": plan.confidence,
+        "planner_reasoning": plan.reasoning,
+        "query_plan": plan.to_dict() if hasattr(plan, "to_dict") else {},
+        "constraints_locked": getattr(plan, "constraints_locked", {}),
+        "columns_used": evidence.columns_used,
+        "critic_passed": critic_result.passed,
+        "critic_issues": critic_result.issues,
+    }
+
+    return {
+        "final_answer": synthesis.answer,
+        "summary": synthesis.answer,
+        "code": "",
+        "result_preview": "",
+        "result_base64": "",
+        "exec_error": None,
+        "engine": "pandas",
+        "needs_data": True,
+        "use_case": "data_analytics",
+        "loaded_skills": ["semantic-planner"],
+        "tool_timeline": timeline,
+        "sql_metadata": {},
+        "structured_report": {
+            "question": question,
+            "summary": synthesis.answer,
+            "key_findings": key_findings,
+            "evidence": [f"Computed from {evidence.record_count} records using {', '.join(evidence.columns_used)}"],
+            "limitations": synthesis.limitations,
+            "next_steps": synthesis.next_steps,
+            "tool_timeline": timeline,
+        },
+        "key_findings": key_findings,
+        "limitations": synthesis.limitations,
+        "next_steps": synthesis.next_steps,
+        "trace_metadata": trace_metadata,
+        "critic_verdict": "OK" if critic_result.passed else "CLEANED",
+        "critic_feedback": "; ".join(critic_result.issues) if critic_result.issues else "",
+        "artifacts": artifacts,
+    }
+
+
+def _is_exact_column_query(question: str, df: Any) -> bool:
+    """Check if the question explicitly names a column (hybrid mode: skip LLM planner)."""
+    import pandas as pd
+    if not isinstance(df, pd.DataFrame):
+        return False
+    text = " ".join(str(question or "").lower().replace("_", " ").split())
+    columns = [str(c).lower().replace("_", " ") for c in df.columns]
+    # If 2+ column names appear verbatim in the question, deterministic is fine
+    matched = sum(1 for col in columns if col in text and len(col) > 2)
+    return matched >= 2
+
+
+def _has_explicit_semantic_constraints(question: str, df: Any) -> bool:
+    import pandas as pd
+    if not isinstance(df, pd.DataFrame):
+        return False
+    text = " ".join(str(question or "").lower().replace("_", " ").split())
+    constraint_markers = (
+        "grouping column",
+        "use ",
+        " as the metric",
+        " as metric",
+        "numeric metric",
+        "do not use",
+        "don't use",
+        "dont use",
+        "top ",
+        "total ",
+        "sum ",
+        "average ",
+        "mean ",
+        "median ",
+        "visualization",
+        "chart",
+        "plot",
+        "graph",
+    )
+    if not any(marker in text for marker in constraint_markers):
+        return False
+    columns = [str(c).lower().replace("_", " ") for c in df.columns]
+    return any(col in text and len(col) > 2 for col in columns)

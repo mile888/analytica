@@ -5,11 +5,9 @@ from typing import Any
 
 from source.product.analytical_graph import (
     evaluate_large_record_hypothesis,
-    has_impossible_counts,
     synthesize_contradiction,
     synthesize_support,
     synthesize_validation,
-    transformation_from_payload,
     transformation_from_rows,
 )
 from source.product.language_policy import DetectedLanguage, ResponseLanguagePolicy
@@ -404,7 +402,7 @@ def _evidence_response_en(target: ActiveAnalyticalTarget, rows: list[dict[str, A
             "Repeated order-like IDs remain separate because they may be line items rather than duplicate orders."
         )
     subject = target.evidence_subject or target.hypothesis or f"{metric} by {dimension}"
-    return f"{subject} The next supporting evidence must stay on {metric} by {dimension} and cite a concrete chart, table, or quality check."
+    return f"{subject} The next useful check is to validate {metric} by {dimension} with a concrete chart, table, or quality check."
 
 
 def _contradiction_response_en(target: ActiveAnalyticalTarget, rows: list[dict[str, Any]]) -> str:

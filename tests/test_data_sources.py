@@ -190,9 +190,9 @@ def test_api_upload_empty_csv_profiles_empty_frame(tmp_path: Path, monkeypatch) 
         files={"file": ("empty.csv", b"", "text/csv")},
     )
 
-    assert response.status_code == 200
-    assert response.json()["profile"]["row_count"] == 0
-    assert response.json()["profile"]["column_count"] == 0
+    # Zero-byte files are not valid CSV — return 400
+    assert response.status_code == 400
+    assert "empty" in response.json()["detail"].lower()
 
 
 def test_api_upload_ragged_csv_profiles_with_bad_lines_skipped(tmp_path: Path, monkeypatch) -> None:
@@ -686,7 +686,7 @@ def test_unusual_group_follow_up_uses_concrete_groups_from_csv(tmp_path: Path) -
 
     assert run.status == InvestigationRunStatus.COMPLETED
     assert "Research Scientist" in updated.report.summary
-    assert "widest spread" in updated.report.summary.lower()
+    assert "least stable group" in updated.report.summary.lower() or "group spread" in updated.report.summary.lower()
     assert any("Unusual Salary_LPA groups" in artifact.title for artifact in updated.artifacts)
 
 

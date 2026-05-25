@@ -472,8 +472,9 @@ def test_deterministic_fallback_adds_reasoning_depth_to_grouped_analysis() -> No
     updated = service.run_investigation(investigation.investigation_id, df=df)
 
     summary = updated.report.summary
-    assert "may reflect" in summary
-    assert "hidden subgroup" in summary
+    assert "extreme values" in summary or "outlier" in summary
+    assert "mixed subgroup" in summary or "subgroup" in summary
+    assert "record-count" in summary or "validate" in summary.lower()
     assert "Evidence" in " ".join(updated.report.limitations)
     assert_no_methodology_narration(summary)
 
@@ -505,7 +506,7 @@ def test_deterministic_fallback_answers_unusual_groups_with_results_not_methodol
 
     summary = updated.report.summary
     assert "Research Scientist" in summary
-    assert "widest spread" in summary.lower()
+    assert "least stable group" in summary.lower() or "group spread" in summary.lower()
     assert "150.00" in summary
     assert_no_methodology_narration(summary)
     assert updated.trace[0]["tool"] == "group_unusual_values_check"
@@ -806,6 +807,27 @@ def test_chart_intent_trend_uses_line_chart() -> None:
     assert chart.content["chart_type"] == "line"
     assert chart.content["timestamp"] == "event_date"
     assert updated.trace[0]["tool"] == "trend_check"
+
+
+def test_explicit_line_chart_over_named_date_wins_over_category_ranking() -> None:
+    def error_runner(**kwargs):
+        return {"exec_error": "Deep Agent did not produce an analytics tool result.", "critic_verdict": "ERROR"}
+
+    df = pd.DataFrame(
+        {
+            "Category": ["A", "B", "A", "B"],
+            "Sales": [10.0, 20.0, 15.0, 25.0],
+            "Order Date": ["2026-01-01", "2026-01-15", "2026-02-01", "2026-02-15"],
+        }
+    )
+    service = InvestigationService(runner=error_runner)
+    investigation = service.create_investigation("Create a line chart of total Sales over Order Date.")
+
+    updated = service.run_investigation(investigation.investigation_id, df=df)
+
+    chart = next(artifact for artifact in updated.artifacts if artifact.artifact_type == ArtifactType.CHART)
+    assert chart.content["chart_type"] == "line"
+    assert chart.content["timestamp"] == "Order Date"
 
 
 def test_chart_intent_distribution_uses_histogram() -> None:

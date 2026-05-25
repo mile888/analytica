@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import re
 import sqlite3
 from pathlib import Path
@@ -9,6 +10,27 @@ from typing import Any, NamedTuple
 import pandas as pd
 
 from source.config import MAX_SQL_ROWS, SQL_TABLE_NAME, resolve_project_path
+
+
+# ── Encoding fallback chain ──────────────────────────────────────────────
+# Real-world CSVs from Excel, Kaggle, Windows BI tools, and ERP systems
+# are frequently NOT strict UTF-8.  We try encodings in order of
+# likelihood, using a small sample to detect before full-file parse.
+_ENCODING_CHAIN: tuple[str, ...] = ("utf-8", "utf-8-sig", "cp1252", "latin-1", "cp1251")
+
+
+class CsvLoadError(Exception):
+    """Raised when a CSV file cannot be parsed with any supported encoding."""
+
+    def __init__(self, path: str | Path, tried: tuple[str, ...] = _ENCODING_CHAIN):
+        encodings = ", ".join(tried)
+        self.user_message = (
+            f"Could not parse the uploaded CSV file.\n\n"
+            f"Tried encodings: {encodings}.\n\n"
+            f"The file may be corrupted or use an unsupported encoding.\n"
+            f"Try re-saving the file as UTF-8 CSV from Excel or Google Sheets."
+        )
+        super().__init__(self.user_message)
 
 
 _READ_ONLY_SQL_RE = re.compile(r"^\s*(select|with|pragma)\b", re.IGNORECASE | re.DOTALL)
@@ -42,17 +64,24 @@ def resolve_csv_dataset_path(path: str | Path) -> Path:
 
 
 def read_csv_dataset(path: str | Path, **kwargs: Any) -> pd.DataFrame:
-    """Read a CSV file or the first CSV in a directory."""
+    """Read a CSV file or the first CSV in a directory.
+
+    Automatically tries multiple encodings and delimiter recovery.
+    Raises ``CsvLoadError`` with a human-readable message when all fail.
+    """
     csv_path = resolve_csv_dataset_path(path)
     read_kwargs = dict(kwargs)
+    encoding = _detect_encoding(csv_path)
+    if encoding and "encoding" not in read_kwargs:
+        read_kwargs["encoding"] = encoding
     try:
         return _read_csv_with_dialect_recovery(csv_path, read_kwargs)
-    except pd.errors.ParserError:
+    except (pd.errors.ParserError, UnicodeDecodeError):
         retry_kwargs = dict(read_kwargs)
         retry_kwargs.setdefault("escapechar", chr(92))
         try:
             return _read_csv_with_dialect_recovery(csv_path, retry_kwargs)
-        except pd.errors.ParserError:
+        except (pd.errors.ParserError, UnicodeDecodeError):
             retry_kwargs.setdefault("on_bad_lines", "skip")
             return _read_csv_with_dialect_recovery(csv_path, retry_kwargs)
 
@@ -105,7 +134,7 @@ def _read_csv_with_dialect_recovery(csv_path: Path, read_kwargs: dict[str, Any])
     df = pd.read_csv(csv_path, **read_kwargs)
     if not dataframe_looks_glued(df) or "sep" in read_kwargs or "delimiter" in read_kwargs:
         return df
-    sample = _read_text_sample(csv_path)
+    sample = _read_text_sample(csv_path, encoding=read_kwargs.get("encoding"))
     delimiter = infer_delimiter_from_text(sample)
     if not delimiter:
         return df
@@ -113,9 +142,30 @@ def _read_csv_with_dialect_recovery(csv_path: Path, read_kwargs: dict[str, Any])
     return recovered if len(recovered.columns) > len(df.columns) else df
 
 
-def _read_text_sample(csv_path: Path, limit: int = 65536) -> str:
+def _detect_encoding(csv_path: Path) -> str | None:
+    """Detect file encoding by trying a small sample with each candidate."""
     try:
-        with csv_path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+        raw = csv_path.read_bytes()[:8192]
+    except OSError:
+        return None
+    if not raw:
+        return None
+    # BOM detection
+    if raw[:3] == b"\xef\xbb\xbf":
+        return "utf-8-sig"
+    for encoding in _ENCODING_CHAIN:
+        try:
+            raw.decode(encoding)
+            return encoding
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return None
+
+
+def _read_text_sample(csv_path: Path, limit: int = 65536, encoding: str | None = None) -> str:
+    enc = encoding or "utf-8-sig"
+    try:
+        with csv_path.open("r", encoding=enc, errors="replace") as handle:
             return handle.read(limit)
     except OSError:
         return ""

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
 import { Investigation } from "@/lib/api";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { formatDate } from "@/components/ui";
@@ -24,15 +25,40 @@ export function AppShell({
   const pathname = usePathname();
   const crumbs = buildBreadcrumbs(pathname);
   const visibleRecentInvestigations = productInvestigations(recentInvestigations).slice(0, 3);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[280px_1fr]">
-      <aside className="no-print border-r border-slate-200 bg-white px-5 py-6 dark:border-slate-800 dark:bg-slate-950">
+      {/* ── Mobile top bar ─────────────────────────────────────────── */}
+      <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3 lg:hidden dark:border-slate-800 dark:bg-slate-950">
         <Link href="/" className="block">
+          <div className="text-lg font-semibold text-ink dark:text-slate-50">Analytica</div>
+        </Link>
+        <div className="flex items-center gap-3">
+          <ThemeToggle />
+          <button
+            onClick={() => setMobileNavOpen(!mobileNavOpen)}
+            className="rounded-md p-2 text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+            aria-label="Toggle navigation"
+          >
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              {mobileNavOpen ? (
+                <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+              ) : (
+                <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+              )}
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* ── Sidebar (desktop always visible, mobile collapsible) ──── */}
+      <aside className={`no-print border-r border-slate-200 bg-white px-5 py-6 dark:border-slate-800 dark:bg-slate-950 ${mobileNavOpen ? "block" : "hidden"} lg:block`}>
+        <Link href="/" className="hidden lg:block">
           <div className="text-lg font-semibold text-ink dark:text-slate-50">Analytica</div>
           <div className="mt-1 text-sm text-muted dark:text-slate-400">Analytical Investigation Agent</div>
         </Link>
-        <nav className="mt-8 space-y-1">
+        <nav className="mt-4 space-y-1 lg:mt-8">
           {navItems.map((item) => {
             const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
             const isDashboard = item.href === "/";
@@ -41,7 +67,8 @@ export function AppShell({
               <Link
                 key={item.href}
                 href={item.href}
-                className={`block rounded-md px-3 py-2 text-sm font-medium transition ${
+                onClick={() => setMobileNavOpen(false)}
+                className={`block rounded-md px-3 py-2.5 text-sm font-medium transition ${
                   isActive
                     ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-950"
                     : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-900"
@@ -53,7 +80,7 @@ export function AppShell({
           })}
         </nav>
 
-        <div className="mt-8">
+        <div className="mt-6 lg:mt-8">
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
             Recent investigations
           </div>
@@ -63,6 +90,7 @@ export function AppShell({
                 <Link
                   key={item.investigation_id}
                   href={`/investigations/${item.investigation_id}`}
+                  onClick={() => setMobileNavOpen(false)}
                   className="block rounded-md border border-slate-200 bg-slate-50/70 p-3 text-xs hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900/70 dark:hover:bg-slate-800"
                 >
                   <div className="line-clamp-2 font-medium text-slate-800 dark:text-slate-100">{item.title}</div>
@@ -79,7 +107,7 @@ export function AppShell({
       </aside>
 
       <div className="min-w-0">
-        <header className="no-print sticky top-0 z-10 border-b border-slate-200 bg-slate-50/90 px-6 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-950/85 lg:px-8">
+        <header className="no-print sticky top-0 z-10 hidden border-b border-slate-200 bg-slate-50/90 px-6 py-3 backdrop-blur lg:block dark:border-slate-800 dark:bg-slate-950/85 lg:px-8">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <nav className="text-sm text-slate-500 dark:text-slate-400">
               {crumbs.map((crumb, index) => (
@@ -95,12 +123,10 @@ export function AppShell({
                 </span>
               ))}
             </nav>
-            <div className="hidden sm:block">
-              <ThemeToggle />
-            </div>
+            <ThemeToggle />
           </div>
         </header>
-        <main className="min-w-0 px-4 py-6 sm:px-6 lg:px-8">{children}</main>
+        <main className="min-w-0 px-3 py-4 sm:px-4 sm:py-6 lg:px-8">{children}</main>
       </div>
     </div>
   );

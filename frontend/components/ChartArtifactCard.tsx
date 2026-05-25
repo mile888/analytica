@@ -12,12 +12,14 @@ export function ChartArtifactCard({
   artifact,
   investigationId,
   linkedDataSourceIds = [],
-  compact = false
+  compact = false,
+  datasetLabel = ""
 }: {
   artifact: Artifact;
   investigationId: string;
   linkedDataSourceIds?: string[];
   compact?: boolean;
+  datasetLabel?: string;
 }) {
   const chart = normalizeChartArtifact(artifact);
   const router = useRouter();
@@ -34,7 +36,7 @@ export function ChartArtifactCard({
         <div className="text-[11px] font-semibold uppercase tracking-wide">Artifact validation error</div>
         <h3 className="mt-1 text-sm font-semibold">{artifact.title || "Chart artifact"}</h3>
         <p className="mt-2 text-xs leading-5">
-          This chart payload could not be rendered safely because its bins, counts, row totals, or chart metadata are inconsistent.
+          This chart payload could not be rendered safely because its values, labels, row totals, or chart metadata are inconsistent.
         </p>
       </article>
     );
@@ -44,9 +46,18 @@ export function ChartArtifactCard({
     setBusy("explain");
     try {
       const branchId = artifactBranchId(artifact);
+      // Branch activation is best-effort: branch IDs are computed keys that
+      // can become stale after investigation updates or page refreshes.
+      // Chart explanation must work from artifact metadata alone.
       if (branchId) {
-        await activateInvestigationBranch(investigationId, branchId);
+        try {
+          await activateInvestigationBranch(investigationId, branchId);
+        } catch {
+          // Branch not found or stale — proceed without activation.
+          // The artifact metadata passed in the message is sufficient.
+        }
       }
+      const chartContent = typeof artifact.content === "object" && artifact.content !== null ? artifact.content as Record<string, unknown> : {};
       const message = await createInvestigationMessage(investigationId, {
         role: "user",
         type: "follow_up",
@@ -54,7 +65,15 @@ export function ChartArtifactCard({
         metadata: {
           action: "explain_artifact",
           artifact_id: artifact.artifact_id,
-          branch_id: branchId
+          branch_id: branchId || undefined,
+          dataset_id: typeof artifact.metadata?.dataset_id === "string" ? artifact.metadata.dataset_id : undefined,
+          dataset_ids: Array.isArray(artifact.metadata?.dataset_ids) ? artifact.metadata.dataset_ids : undefined,
+          chart_type: typeof chartContent.chart_type === "string" ? chartContent.chart_type : undefined,
+          chart_title: artifact.title || undefined,
+          metric: typeof chartContent.metric === "string" ? chartContent.metric : (typeof chartContent.y_metric === "string" ? chartContent.y_metric : (typeof (artifact.metadata?.metric) === "string" ? artifact.metadata.metric as string : undefined)),
+          dimension: typeof chartContent.dimension === "string" ? chartContent.dimension : (typeof chartContent.grouping === "string" ? chartContent.grouping : (typeof chartContent.x === "string" ? chartContent.x as string : undefined)),
+          x_metric: typeof chartContent.x_metric === "string" ? chartContent.x_metric : undefined,
+          y_metric: typeof chartContent.y_metric === "string" ? chartContent.y_metric : undefined
         }
       });
       await runInvestigation(investigationId, {
@@ -92,6 +111,7 @@ export function ChartArtifactCard({
             {chartTypeLabel(chart.type)}
           </div>
           <h3 className="mt-1 line-clamp-2 text-sm font-semibold text-slate-950 dark:text-slate-50">{chart.title}</h3>
+          {datasetLabel ? <div className="mt-1 text-[11px] font-medium text-slate-400">{datasetLabel}</div> : null}
           {!compact ? <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{chartSummary(chart)}</p> : null}
         </div>
       </div>
@@ -294,13 +314,30 @@ function ScatterChart({ chart, compact }: { chart: ChartPreviewData; compact?: b
   const spanY = maxY - minY || 1;
   return (
     <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/70">
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-28 w-full">
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-28 w-full overflow-visible">
+        <line x1="10" y1={height - 10} x2={width - 10} y2={height - 10} className="stroke-slate-300 dark:stroke-slate-700" strokeWidth="1" />
+        <line x1="10" y1="10" x2="10" y2={height - 10} className="stroke-slate-300 dark:stroke-slate-700" strokeWidth="1" />
         {chart.points.map((point, index) => {
           const x = (((point.x ?? 0) - minX) / spanX) * (width - 20) + 10;
           const y = height - (((point.y ?? point.value) - minY) / spanY) * (height - 20) - 10;
-          return <circle key={`${point.label}-${index}`} cx={x} cy={y} r="3" className="fill-blue-500/80 dark:fill-blue-300/80" />;
+          return (
+            <g key={`${point.label}-${index}`}>
+              <circle cx={x} cy={y} r="3.5" className="fill-blue-500/80 dark:fill-blue-300/80" />
+              {!compact ? (
+                <text x={Math.min(width - 48, x + 5)} y={Math.max(12, y - 5)} className="fill-slate-500 text-[9px] dark:fill-slate-300">
+                  {point.label}
+                </text>
+              ) : null}
+            </g>
+          );
         })}
       </svg>
+      {!compact ? (
+        <div className="mt-1 flex justify-between gap-3 text-[10px] font-medium uppercase tracking-wide text-slate-400">
+          <span className="truncate">{chart.xLabel}</span>
+          <span className="truncate text-right">{chart.yLabel}</span>
+        </div>
+      ) : null}
     </div>
   );
 }

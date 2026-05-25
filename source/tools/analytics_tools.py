@@ -19,7 +19,7 @@ from source.dataframe import (
 from source.engine import create_engine
 from source.func import _bar_codegen, detect_engine, preview_result_and_facts, safe_exec
 from source.runtime_context import AnalyticaContext
-from source.product.branch_workspace import BranchWorkspace, BranchWorkspaceManager
+from source.product.branch_workspace import BranchWorkspaceManager
 from source.product.execution_planner import (
     AuthoritativeExecutionPlanner,
     FilterConstraintValidator,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from source.product.analytical_graph import (
     EvidenceExecutionResult,
@@ -67,6 +68,7 @@ def test_transformation_followups_compare_raw_and_adjusted_rankings() -> None:
     assert "Jamestown" in changed or "Jamestown" in unreliable
 
 
+@pytest.mark.integration
 def test_evidence_and_contradiction_use_real_transformation_state() -> None:
     df = _city_sales_df()
     store = InvestigationStore()
@@ -141,6 +143,7 @@ def test_temporal_category_resolution_prefers_category_over_segment() -> None:
     assert "`Segment`" not in answer
 
 
+@pytest.mark.integration
 def test_temporal_shipping_evidence_is_concrete() -> None:
     df = pd.DataFrame(
         {
@@ -227,6 +230,7 @@ def test_repeated_duplicate_question_answers_naturally() -> None:
     assert "new computed result" not in answer.lower()
 
 
+@pytest.mark.integration
 def test_sparse_hypothesis_evidence_is_fact_first() -> None:
     df = _city_sales_df()
     store = InvestigationStore()

@@ -85,22 +85,16 @@ def _confidence_level(
     if kind == "limitation":
         return "Needs validation"
     score = len(evidence) + output_count
-    if limitations:
+    # Only downgrade for limitations when evidence is marginal.
+    # Real computed findings (evidence + outputs >= 3) should stay "High"
+    # even when standard caveats are attached.
+    if limitations and score < 3:
         score -= 1
-    if score >= 3:
+    if score >= 2:
         return "High"
     if score >= 1:
         return "Medium"
     return "Low"
-
-
-def _evidence_strength(evidence: list[str], output_count: int) -> str:
-    score = len(evidence) + output_count
-    if score >= 3:
-        return "Strong"
-    if score >= 1:
-        return "Moderate"
-    return "Needs evidence"
 
 
 def _normalized_evidence_strength(evidence: list[str], output_count: int) -> str:
@@ -143,10 +137,11 @@ def _business_impact(text: str, kind: str) -> str:
     if kind == "limitation":
         return "Risk control"
     normalized = text.lower()
-    high_markers = ("outlier", "anomal", "risk", "highest", "lowest", "significant", "strong", "variance", "spread")
+    high_markers = ("outlier", "anomal", "risk", "highest", "lowest", "significant", "strong", "variance", "spread",
+                    "joinab", "warehouse", "identifier", "attribution", "integration", "not reliably")
     if any(marker in normalized for marker in high_markers):
         return "High"
-    if any(marker in normalized for marker in ("trend", "segment", "group", "compare", "correlat")):
+    if any(marker in normalized for marker in ("trend", "segment", "group", "compare", "correlat", "bridge", "overlap", "entity", "shared")):
         return "Medium"
     return "Medium"
 
@@ -165,6 +160,8 @@ def _business_implication(text: str, kind: str) -> str:
         return "The movement may indicate a change in underlying behavior that deserves monitoring."
     if any(marker in normalized for marker in ("missing", "duplicate", "quality")):
         return "Data reliability affects how much weight analysts should place on downstream conclusions."
+    if any(marker in normalized for marker in ("joinab", "warehouse", "identifier", "shared", "bridge", "entity", "overlap", "attribution", "integration")):
+        return "This structural conclusion affects whether the datasets can be used together for integrated analysis."
     return "This conclusion can help focus the next analytical step or report narrative."
 
 
@@ -195,6 +192,8 @@ def _analysis_type(text: str, evidence: list[str]) -> str:
         return "data_quality"
     if any(marker in normalized for marker in ("grouped", "by `", "across", "group", "segment")):
         return "grouped_metric"
+    if any(marker in normalized for marker in ("joinab", "shared", "warehouse", "bridge", "entity", "overlap", "compatibility", "identifier", "granularity", "cross.dataset", "not reliably")):
+        return "cross_dataset"
     return "overview"
 
 
@@ -208,6 +207,14 @@ def _normalized_analysis_type(value: str) -> str:
         "trend_check": "trend",
         "data_quality_check": "data_quality",
         "thread_count_relationship_check": "volume_relationship",
+        "diversity_analysis": "diversity_analysis",
+        "category_mix_shift": "category_mix_shift",
+        "strategic_synthesis": "strategic_synthesis",
+        "multi_factor_association": "multi_factor_association",
+        "category_growth": "category_growth",
+        "semantic_role_prevalence": "prevalence",
+        "semantic_role_association": "association",
+        "duration_by_category": "duration_analysis",
     }
     return mapping.get(normalized, normalized or "overview")
 

@@ -63,6 +63,25 @@ ANALYTICA_HTTP_REFERER = env_str("ANALYTICA_HTTP_REFERER", "http://localhost:850
 ANALYTICA_APP_TITLE = env_str("ANALYTICA_APP_TITLE", "Analytica")
 CORS_ORIGINS = env_list("ANALYTICA_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
 
+# ── Auto-add LAN origins for mobile/demo access ─────────────────────────
+# When running locally, phones on the same WiFi need CORS to accept the
+# local IP.  We detect the machine's LAN IP and add it automatically.
+def _lan_cors_origins() -> tuple[str, ...]:
+    """Return CORS origins for the machine's LAN IP addresses."""
+    import socket
+    extras: list[str] = []
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip.startswith(("192.168.", "10.", "172.")):
+                extras.append(f"http://{ip}:3000")
+    except Exception:
+        pass
+    return tuple(extras)
+
+CORS_ORIGINS = CORS_ORIGINS + _lan_cors_origins()
+
 THREAD_PREFIX = env_str("ANALYTICA_THREAD_PREFIX", "analytica")
 ANALYTICA_THREAD_ID = env_str("ANALYTICA_THREAD_ID", "")
 ANALYTICA_CHECKPOINTER_TYPE = env_str("ANALYTICA_CHECKPOINTER_TYPE", "memory").lower()
@@ -110,3 +129,9 @@ ALLOWED_CODE_IMPORTS = tuple(
     for part in env_str("ANALYTICA_ALLOWED_CODE_IMPORTS", "math,statistics,numpy,pandas,matplotlib,matplotlib.pyplot").split(",")
     if part.strip()
 )
+
+# ── Semantic planner mode ─────────────────────────────────────────────────
+# "hybrid"             — deterministic for exact queries, LLM for semantic/abstract
+# "llm_first"          — always try LLM planner first, fallback to deterministic
+# "deterministic_first" — never use LLM planner (legacy behavior)
+SEMANTIC_PLANNER_MODE = env_str("ANALYTICA_SEMANTIC_PLANNER_MODE", "hybrid")

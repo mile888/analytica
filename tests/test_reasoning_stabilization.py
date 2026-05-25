@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from source.product.affected_findings import AffectedFindingsAnalyzer
 from source.product.conversation_engine import response_quality_gate
@@ -184,6 +185,7 @@ def test_quality_gate_rejects_raw_ranking_after_adjusted_transformation() -> Non
     assert reason == "contradicts_active_transformation"
 
 
+@pytest.mark.integration
 def test_shipping_behavior_uses_ship_mode_and_delay_not_raw_ship_date() -> None:
     df = pd.DataFrame(
         {
@@ -293,6 +295,7 @@ def test_transformation_artifact_persists_dimension_and_metric_lineage() -> None
     assert adjusted.content["base_dimension"] == "City"
 
 
+@pytest.mark.integration
 def test_explain_adjusted_chart_uses_transformed_artifact_not_fresh_grouping() -> None:
     df = pd.DataFrame(
         {
@@ -325,6 +328,7 @@ def test_explain_adjusted_chart_uses_transformed_artifact_not_fresh_grouping() -
     assert "Sub-Category" not in answer
 
 
+@pytest.mark.integration
 def test_histogram_explanation_uses_distribution_language() -> None:
     df = pd.DataFrame(
         {
@@ -423,6 +427,7 @@ def test_contradiction_followup_stays_on_active_city_hypothesis() -> None:
     assert "`Ship Mode`" not in answer
 
 
+@pytest.mark.integration
 def test_repeated_explicit_hypotheses_each_run_full_validation() -> None:
     df = pd.DataFrame(
         {
@@ -517,6 +522,7 @@ def test_transformation_persists_across_long_followup_chain() -> None:
     assert "Jamestown" not in answer
 
 
+@pytest.mark.integration
 def test_shipping_delay_hypothesis_and_followups_stay_operational() -> None:
     df = pd.DataFrame(
         {

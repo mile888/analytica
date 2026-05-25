@@ -33,3 +33,7 @@ providers:
 node_overrides:
   deep_agent:
     temperature: 0.2
+  semantic_planner:
+    temperature: 0.0
+  semantic_compatibility:
+    temperature: 0.0

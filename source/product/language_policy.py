@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Iterable
-import re
 
 
 class DetectedLanguage(StrEnum):
@@ -53,41 +52,3 @@ def choose(policy: ResponseLanguagePolicy | DetectedLanguage | str, *, en: str, 
 
 def average_chart_title(metric: str, dimension: str, policy: ResponseLanguagePolicy) -> str:
     return f"Average `{metric}` by `{dimension}`"
-
-
-def preserve(value: str) -> str:
-    return f"`{value}`"
-
-
-_TECHNICAL_ENGLISH = {
-    "id", "api", "csv", "sql", "json", "html", "url", "ui", "ux", "kpi", "crm",
-    "sales", "city", "country", "segment", "category", "technology", "standard", "class",
-}
-
-
-def _strip_protected(text: str, terms: Iterable[str]) -> str:
-    cleaned = text
-    cleaned = re.sub(r"`[^`]*`", " ", cleaned)
-    cleaned = re.sub(r"'[^']*'|\"[^\"]*\"", " ", cleaned)
-    for term in sorted({str(item).strip() for item in terms if str(item).strip()}, key=len, reverse=True):
-        cleaned = re.sub(re.escape(term), " ", cleaned, flags=re.IGNORECASE)
-    return cleaned
-
-
-def _strip_code_like(text: str) -> str:
-    text = re.sub(r"\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_.]+\b", " ", text)
-    text = re.sub(r"\b[A-Z][A-Za-z0-9_]*_[A-Za-z0-9_]+\b", " ", text)
-    return text
-
-
-def _first_alpha_script(text: str) -> DetectedLanguage:
-    for char in text:
-        if re.match(r"[А-Яа-яЁё]", char):
-            return DetectedLanguage.RUSSIAN
-        if re.match(r"[A-Za-z]", char):
-            return DetectedLanguage.ENGLISH
-    return DetectedLanguage.UNKNOWN
-
-
-def _has_cyrillic(value: str) -> bool:
-    return bool(re.search(r"[А-Яа-яЁё]", value))

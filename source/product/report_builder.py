@@ -10,11 +10,13 @@ from source.product.investigation import (
     Finding,
     FindingStatus,
     Investigation,
+    InvestigationMessage,
     ReportSection,
     ShareableReport,
     ShareableReportStatus,
     ShareableReportTemplate,
 )
+from source.product.report_artifacts import artifact_report_snapshot, ensure_artifact_report_image
 from source.product.organizational_workflows import (
     InvestigationReview,
     ReportStandard,
@@ -29,6 +31,7 @@ def build_shareable_report(
     analytical_patterns: list[CrossInvestigationPattern] | None = None,
     organizational_review: InvestigationReview | None = None,
     report_standard: ReportStandard | None = None,
+    messages: list[InvestigationMessage] | None = None,
 ) -> ShareableReport:
     resolved_template = ShareableReportTemplate(template)
     if resolved_template == ShareableReportTemplate.EXECUTIVE_SUMMARY:
@@ -38,6 +41,7 @@ def build_shareable_report(
             analytical_patterns=analytical_patterns,
             organizational_review=organizational_review,
             report_standard=report_standard,
+            messages=messages,
         )
     if resolved_template == ShareableReportTemplate.PRODUCT_DECISION_MEMO:
         return build_product_decision_memo_report(
@@ -46,6 +50,7 @@ def build_shareable_report(
             analytical_patterns=analytical_patterns,
             organizational_review=organizational_review,
             report_standard=report_standard,
+            messages=messages,
         )
     if resolved_template == ShareableReportTemplate.TECHNICAL_APPENDIX:
         return build_technical_appendix_report(investigation)
@@ -58,20 +63,30 @@ def build_executive_summary_report(
     analytical_patterns: list[CrossInvestigationPattern] | None = None,
     organizational_review: InvestigationReview | None = None,
     report_standard: ReportStandard | None = None,
+    messages: list[InvestigationMessage] | None = None,
 ) -> ShareableReport:
     findings = _selected_findings(investigation)
     artifacts = _selected_artifacts(investigation, include_technical=include_technical)
-    report = investigation.report
+    history = _history_items(messages or [])
+    limitations = _limitations(investigation, findings)
+    artifact_snapshots = _artifact_snapshots(artifacts)
+    datasets = _dataset_ids(investigation, artifacts)
+    branch_ids = _branch_ids(artifacts)
+    summary = _investigation_summary(investigation, history, findings, datasets)
     sections = [
-        ReportSection(title="Question", content=investigation.user_question, order=10),
-        ReportSection(title="Answer", content=(report.answer or report.summary) if report else "", order=20),
-        ReportSection(title="Key findings", content=_insight_report_block(findings), order=30),
-        ReportSection(title="Evidence", content=_bullets(_artifact_evidence(artifacts)), order=40, artifact_ids=[item.artifact_id for item in artifacts]),
-        ReportSection(title="Limitations", content=_insight_field_bullets(findings, "limitation"), order=50),
-        ReportSection(title="Next steps", content=_insight_field_bullets(findings, "recommended_validation"), order=60),
-        ReportSection(title="Common validation checks", content=_bullets(report_pattern_hints(analytical_patterns or [])), order=65),
-        ReportSection(title="Evidence standards", content=_bullets(report_standard_hints(report_standard, organizational_review) if report_standard else []), order=66),
+        ReportSection(title="Investigation summary", content=summary, order=10, section_type="summary", source_question_ids=_question_ids(history)),
+        ReportSection(title="Key findings", content=_insight_report_block(findings), order=20, section_type="key_findings"),
+        ReportSection(title="Analytical workflow", content=_workflow_block(history, investigation), order=30, section_type="workflow", source_question_ids=_question_ids(history)),
+        ReportSection(title="Complete Q&A transcript", content=_transcript_block(history, investigation), order=35, section_type="transcript", source_question_ids=_question_ids(history)),
+        ReportSection(title="Visual analysis", content=_visual_analysis_block(artifact_snapshots), order=40, section_type="visual_analysis", artifact_ids=[item.artifact_id for item in artifacts], source_artifact_ids=[item.artifact_id for item in artifacts], metadata={"artifact_snapshots": artifact_snapshots}),
+        ReportSection(title="Evidence", content=_bullets(_artifact_evidence(artifacts)), order=45, section_type="evidence", artifact_ids=[item.artifact_id for item in artifacts], source_artifact_ids=[item.artifact_id for item in artifacts]),
+        ReportSection(title="Limitations", content=_bullets(limitations), order=50, section_type="limitations"),
+        ReportSection(title="Conclusions", content=_conclusion_block(investigation, findings), order=60, section_type="conclusions"),
+        ReportSection(title="Next steps", content=_insight_field_bullets(findings, "recommended_validation"), order=65, section_type="next_steps"),
+        ReportSection(title="Evidence standards", content=_bullets(report_standard_hints(report_standard, organizational_review) if report_standard else report_pattern_hints(analytical_patterns or [])), order=70, section_type="evidence_standards"),
     ]
+    if analytical_patterns and not report_standard:
+        sections.append(ReportSection(title="Common validation checks", content=_bullets(report_pattern_hints(analytical_patterns)), order=75, section_type="validation_checks"))
     return _report(
         investigation=investigation,
         title=f"{investigation.title} — Executive Summary",
@@ -80,6 +95,13 @@ def build_executive_summary_report(
         sections=sections,
         findings=findings,
         artifacts=artifacts,
+        dataset_ids=datasets,
+        branch_ids=branch_ids,
+        included_question_ids=_question_ids(history),
+        summary=summary,
+        limitations=limitations,
+        artifact_snapshots=artifact_snapshots,
+        history=history,
     )
 
 
@@ -89,30 +111,19 @@ def build_product_decision_memo_report(
     analytical_patterns: list[CrossInvestigationPattern] | None = None,
     organizational_review: InvestigationReview | None = None,
     report_standard: ReportStandard | None = None,
+    messages: list[InvestigationMessage] | None = None,
 ) -> ShareableReport:
-    findings = _selected_findings(investigation)
-    artifacts = _selected_artifacts(investigation, include_technical=include_technical)
-    report = investigation.report
-    recommendation = (report.answer or report.summary) if report else "No recommendation has been generated yet."
-    sections = [
-        ReportSection(title="Context", content=f"Investigation status: {investigation.status.value}", order=10),
-        ReportSection(title="Decision question", content=investigation.user_question, order=20),
-        ReportSection(title="Recommendation", content=recommendation, order=30),
-        ReportSection(title="Supporting evidence", content=_insight_report_block(findings), order=40, artifact_ids=[item.artifact_id for item in artifacts]),
-        ReportSection(title="Risks / limitations", content=_insight_field_bullets(findings, "limitation"), order=50),
-        ReportSection(title="Next steps", content=_insight_field_bullets(findings, "recommended_validation"), order=60),
-        ReportSection(title="Reusable validation checks", content=_bullets(report_pattern_hints(analytical_patterns or [])), order=65),
-        ReportSection(title="Evidence standards", content=_bullets(report_standard_hints(report_standard, organizational_review) if report_standard else []), order=66),
-    ]
-    return _report(
-        investigation=investigation,
-        title=f"{investigation.title} — Product Decision Memo",
-        template=ShareableReportTemplate.PRODUCT_DECISION_MEMO,
+    report = build_executive_summary_report(
+        investigation,
         include_technical=include_technical,
-        sections=sections,
-        findings=findings,
-        artifacts=artifacts,
+        analytical_patterns=analytical_patterns,
+        organizational_review=organizational_review,
+        report_standard=report_standard,
+        messages=messages,
     )
+    report.title = f"{investigation.title} — Product Decision Memo"
+    report.template = ShareableReportTemplate.PRODUCT_DECISION_MEMO
+    return report
 
 
 def build_technical_appendix_report(investigation: Investigation) -> ShareableReport:
@@ -145,7 +156,26 @@ def _report(
     sections: list[ReportSection],
     findings: list[Finding],
     artifacts: list[Artifact],
+    dataset_ids: list[str] | None = None,
+    branch_ids: list[str] | None = None,
+    included_question_ids: list[str] | None = None,
+    summary: str = "",
+    limitations: list[str] | None = None,
+    artifact_snapshots: list[dict] | None = None,
+    history: list[dict] | None = None,
 ) -> ShareableReport:
+    metadata = {
+        "source": "report_builder",
+        "dataset_ids": dataset_ids or [],
+        "branch_ids": branch_ids or [],
+        "included_question_ids": included_question_ids or [],
+        "summary": summary,
+        "limitations": limitations or [],
+        "included_artifacts": artifact_snapshots or [],
+        "investigation_history": history or [],
+        "included_artifact_ids": [item.artifact_id for item in artifacts],
+        "included_finding_ids": [item.finding_id for item in findings],
+    }
     return ShareableReport(
         investigation_id=investigation.investigation_id,
         title=title,
@@ -153,10 +183,15 @@ def _report(
         status=ShareableReportStatus.DRAFT,
         version=1,
         sections=[section for section in sections if section.content or section.artifact_ids],
+        dataset_ids=dataset_ids or [],
+        branch_ids=branch_ids or [],
+        included_question_ids=included_question_ids or [],
+        summary=summary,
+        limitations=limitations or [],
         source_finding_ids=[item.finding_id for item in findings],
         source_artifact_ids=[item.artifact_id for item in artifacts],
         include_technical=include_technical,
-        metadata={"source": "report_builder"},
+        metadata=metadata,
     )
 
 
@@ -167,6 +202,167 @@ def _selected_findings(investigation: Investigation) -> list[Finding]:
         return _dedupe_findings(sorted(accepted, key=lambda item: item.created_at.isoformat()))[-5:]
     proposed = [item for item in candidates if item.status == FindingStatus.PROPOSED]
     return _dedupe_findings(sorted(proposed, key=lambda item: item.created_at.isoformat()))[-5:]
+
+
+def _history_items(messages: list[InvestigationMessage]) -> list[dict]:
+    items = []
+    for message in sorted(messages, key=lambda item: item.created_at.isoformat()):
+        role = getattr(message.role, "value", message.role)
+        mtype = getattr(message.message_type, "value", message.message_type)
+        if role not in {"user", "assistant"}:
+            continue
+        text = " ".join(str(message.content or "").split())
+        if not text:
+            continue
+        items.append(
+            {
+                "message_id": message.message_id,
+                "run_id": message.run_id,
+                "role": role,
+                "type": mtype,
+                "content": text,
+                "created_at": message.created_at.isoformat(),
+                "metadata": message.metadata if isinstance(message.metadata, dict) else {},
+            }
+        )
+    return items
+
+
+def _question_ids(history: list[dict]) -> list[str]:
+    return [str(item.get("message_id")) for item in history if item.get("role") == "user" and item.get("message_id")]
+
+
+def _dataset_ids(investigation: Investigation, artifacts: list[Artifact]) -> list[str]:
+    ids = list(getattr(investigation, "linked_data_source_ids", []) or [])
+    for artifact in artifacts:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        ids.extend(str(item) for item in metadata.get("dataset_ids", []) if str(item).strip())
+        if metadata.get("dataset_id"):
+            ids.append(str(metadata.get("dataset_id")))
+    return list(dict.fromkeys(ids))
+
+
+def _branch_ids(artifacts: list[Artifact]) -> list[str]:
+    ids = []
+    for artifact in artifacts:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        branch_id = str(metadata.get("branch_id") or "")
+        if branch_id:
+            ids.append(branch_id)
+    return list(dict.fromkeys(ids))
+
+
+def _artifact_snapshots(artifacts: list[Artifact]) -> list[dict]:
+    snapshots = []
+    for artifact in artifacts:
+        image_path = ensure_artifact_report_image(artifact)
+        if image_path:
+            artifact.metadata = dict(artifact.metadata or {})
+            artifact.metadata.setdefault("image_path", image_path)
+            artifact.metadata.setdefault("image_bytes_reference", image_path)
+        snapshots.append(artifact_report_snapshot(artifact, image_path=image_path))
+    return snapshots
+
+
+def _investigation_summary(investigation: Investigation, history: list[dict], findings: list[Finding], dataset_ids: list[str]) -> str:
+    goals = [item["content"] for item in history if item.get("role") == "user"] or [investigation.user_question]
+    outcome = _metadata_text(findings[-1].metadata, "conclusion") if findings else ""
+    if not outcome and investigation.report:
+        outcome = investigation.report.summary or investigation.report.answer
+    return (
+        f"This report summarizes investigation `{investigation.title}` across {len(dataset_ids) or len(investigation.linked_data_source_ids)} dataset(s). "
+        f"The analysis chronology covered {len(goals)} user question(s), starting with: {goals[0]}. "
+        + (f"High-level outcome: {outcome}" if outcome else "The report preserves the investigation history, findings, visuals, and limitations.")
+    )
+
+
+def _workflow_block(history: list[dict], investigation: Investigation) -> str:
+    user_items = [item for item in history if item.get("role") == "user"]
+    assistant_by_run = {item.get("run_id"): item for item in history if item.get("role") == "assistant" and item.get("run_id")}
+    lines = []
+    for index, item in enumerate(user_items, start=1):
+        answer = assistant_by_run.get(item.get("run_id"))
+        answer_text = str((answer or {}).get("content") or "").strip()
+        suffix = f" Result: {_short(answer_text, 180)}" if answer_text else ""
+        lines.append(f"{index}. {item['content']}{suffix}")
+    if not lines:
+        lines.append(f"1. {investigation.user_question}")
+    return "\n".join(lines)
+
+
+def _transcript_block(history: list[dict], investigation: Investigation) -> str:
+    if not history:
+        return f"1. Question: {investigation.user_question}"
+    turns: list[dict[str, str]] = []
+    pending: dict[str, str] | None = None
+    for item in history:
+        role = item.get("role")
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "user":
+            pending = {"question": content, "answer": ""}
+            turns.append(pending)
+        elif role == "assistant":
+            if pending is None:
+                pending = {"question": "", "answer": content}
+                turns.append(pending)
+            else:
+                pending["answer"] = content
+                pending = None
+    lines = []
+    for index, turn in enumerate(turns, start=1):
+        block = [f"{index}. Question: {turn.get('question', '')}"]
+        if turn.get("answer"):
+            block.append(f"Answer: {turn['answer']}")
+        lines.append("\n".join(block))
+    return "\n\n".join(lines)
+
+
+def _visual_analysis_block(snapshots: list[dict]) -> str:
+    if not snapshots:
+        return "No chart or table artifacts were selected for this report."
+    chart_count = sum(1 for item in snapshots if item.get("artifact_type") == "chart")
+    table_count = sum(1 for item in snapshots if item.get("artifact_type") == "table")
+    parts = []
+    if chart_count:
+        parts.append(f"{chart_count} chart{'s' if chart_count != 1 else ''}")
+    if table_count:
+        parts.append(f"{table_count} table{'s' if table_count != 1 else ''}")
+    return f"Selected report artifacts are rendered below: {', '.join(parts) or str(len(snapshots)) + ' artifacts'}."
+
+
+def _limitations(investigation: Investigation, findings: list[Finding]) -> list[str]:
+    values = []
+    if investigation.report:
+        values.extend(investigation.report.limitations)
+    for finding in findings:
+        limitation = _metadata_text(finding.metadata or {}, "limitation")
+        if limitation:
+            values.append(limitation)
+    for artifact in investigation.artifacts:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        for key in ("limitation", "limitations", "warning"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+            elif isinstance(value, list):
+                values.extend(str(item) for item in value if str(item).strip())
+    return list(dict.fromkeys(values)) or ["Interpretation depends on the available uploaded data, selected artifacts, and computed investigation outputs."]
+
+
+def _conclusion_block(investigation: Investigation, findings: list[Finding]) -> str:
+    if findings:
+        conclusions = [_metadata_text(item.metadata or {}, "conclusion") or item.text for item in findings[-3:]]
+        return " ".join(item for item in conclusions if item)
+    if investigation.report:
+        return investigation.report.summary or investigation.report.answer
+    return "No final analytical conclusion has been accepted yet; use the investigation chronology and visual evidence as the current investigation record."
+
+
+def _short(value: str, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
 
 
 def _is_high_confidence_report_finding(finding: Finding) -> bool:
@@ -215,6 +411,7 @@ def _is_high_confidence_report_finding(finding: Finding) -> bool:
         return False
     substantive_markers = (
         " led by ",
+        " leads ",
         " ranks ",
         " distribution ",
         " compares ",

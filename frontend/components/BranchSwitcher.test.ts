@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { InvestigationBranch } from "@/lib/api";
-import { activateBranchSelection, applyActivatedBranch } from "./BranchSwitcher";
+import { activateBranchSelection, applyActivatedBranch, branchTypeLabel } from "./BranchSwitcher";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
 
@@ -73,5 +73,24 @@ describe("BranchSwitcher state", () => {
     expect(selected?.metric).toBe("Sales");
     expect(selected?.filters?.[0]).toMatchObject({ column: "City", value: "Los Angeles" });
     expect(selected?.chart_type).toBe("histogram");
+  });
+
+  it("preserves dataset scope on active branch selection", () => {
+    const selected = applyActivatedBranch([
+      branch("b1", "Sales by City", false, { dataset_id: "ds_sales", dataset_ids: ["ds_sales"], dataset_scope: "single_dataset" }),
+      branch("b2", "Salary by City", true, { dataset_id: "ds_salary", dataset_ids: ["ds_salary"], dataset_scope: "single_dataset" })
+    ], "b1").find((item) => item.is_active);
+
+    expect(selected?.dataset_id).toBe("ds_sales");
+    expect(selected?.dataset_ids).toEqual(["ds_sales"]);
+    expect(selected?.dataset_scope).toBe("single_dataset");
+  });
+
+  it("displays meaningful labels for business and multi-dataset branch types", () => {
+    expect(branchTypeLabel("business")).toBe("Biz");
+    expect(branchTypeLabel("customer_behavior")).toBe("Cust");
+    expect(branchTypeLabel("joinability")).toBe("Join");
+    expect(branchTypeLabel("warehouse_design")).toBe("WH");
+    expect(branchTypeLabel("multi_dataset")).toBe("Multi");
   });
 });

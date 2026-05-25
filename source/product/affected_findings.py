@@ -314,10 +314,6 @@ def _metric(target: ActiveAnalyticalTarget, state: dict[str, Any], df: pd.DataFr
     for col in df.select_dtypes(include="number").columns:
         if str(col).casefold() in normalized:
             return str(col)
-    for col in df.select_dtypes(include="number").columns:
-        name = str(col)
-        if any(marker in name.casefold() for marker in ("sales", "revenue", "profit", "amount", "value")):
-            return name
     return _first_numeric(df)
 
 

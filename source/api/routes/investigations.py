@@ -132,10 +132,16 @@ def activate_investigation_branch(investigation_id: str, branch_id: str):
     try:
         store = get_store()
         investigation = store.get_investigation(investigation_id)
-        metadata = activate_branch(investigation, branch_id)
-        updater = getattr(store, "update_investigation_metadata", None)
-        if callable(updater):
-            updater(investigation_id, metadata)
+        try:
+            metadata = activate_branch(investigation, branch_id)
+            updater = getattr(store, "update_investigation_metadata", None)
+            if callable(updater):
+                updater(investigation_id, metadata)
+        except KeyError:
+            # Branch not found — stale branch ID. Return current branches
+            # without switching. This avoids 404 for stale branch references
+            # (e.g., from chart artifact metadata after investigation updates).
+            pass
         return {"active_branch_id": branch_id, "branches": branch_dtos_for_investigation(store.get_investigation(investigation_id))}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -434,6 +440,65 @@ def update_artifact_report_selection(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/{investigation_id}/artifacts/{artifact_id}/explain")
+def explain_artifact(investigation_id: str, artifact_id: str):
+    """Artifact-first chart explanation lookup.
+
+    Returns artifact chart context without requiring a branch.
+    If the artifact exists, explanation must work even if the branch
+    was deleted, the branch ID is stale, or the page was refreshed.
+    """
+    try:
+        store = get_store()
+        investigation = store.get_investigation(investigation_id)
+        artifact = next(
+            (item for item in investigation.artifacts if item.artifact_id == artifact_id),
+            None,
+        )
+        if artifact is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Artifact not found or no longer available: {artifact_id}",
+            )
+        content = getattr(artifact, "content", None)
+        metadata = getattr(artifact, "metadata", None)
+        content = content if isinstance(content, dict) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        chart_context = {
+            "request_type": "EXPLAIN_ARTIFACT",
+            "artifact_id": artifact_id,
+            "title": getattr(artifact, "title", ""),
+            "chart_type": content.get("chart_type") or metadata.get("chart_type") or "",
+            "metric": content.get("metric") or metadata.get("metric") or "",
+            "dimension": content.get("dimension") or metadata.get("dimension") or content.get("x") or "",
+            "dataset_id": metadata.get("dataset_id") or "",
+            "dataset_ids": metadata.get("dataset_ids") or [],
+            "filters": content.get("filters") or metadata.get("filters") or [],
+            "row_count": metadata.get("row_count") or content.get("row_count"),
+            "branch_id": metadata.get("branch_id") or "",
+            "run_id": getattr(artifact, "run_id", None) or "",
+        }
+        summary_stats = {}
+        rows = content.get("rows") if isinstance(content.get("rows"), list) else []
+        bins = content.get("bins") if isinstance(content.get("bins"), list) else []
+        if rows:
+            chart_context["rows"] = len(rows)
+        if bins:
+            chart_context["bins"] = len(bins)
+            counts = [int(b.get("count") or 0) for b in bins if isinstance(b, dict)]
+            if counts:
+                summary_stats["total_records"] = sum(counts)
+                summary_stats["peak_bin_count"] = max(counts)
+        comparison_groups = content.get("comparison_groups") if isinstance(content.get("comparison_groups"), list) else []
+        if comparison_groups:
+            chart_context["comparison_groups"] = len(comparison_groups)
+        if summary_stats:
+            chart_context["summary"] = summary_stats
+        return chart_context
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/{investigation_id}/reports")
 def list_reports_for_investigation(investigation_id: str):
     try:
@@ -461,7 +526,14 @@ def create_report_for_investigation(investigation_id: str, payload: ShareableRep
             analytical_patterns=patterns,
             organizational_review=review_investigation(investigation, patterns),
             report_standard=report_standard_for_template(body.template),
+            messages=store.list_investigation_messages(investigation_id),
         )
+        for snapshot in report.metadata.get("included_artifacts", []) if isinstance(report.metadata, dict) else []:
+            artifact_id = snapshot.get("artifact_id") if isinstance(snapshot, dict) else ""
+            image_path = snapshot.get("image_path") if isinstance(snapshot, dict) else ""
+            if artifact_id and image_path:
+                with suppress(Exception):
+                    store.update_artifact_metadata(investigation_id, artifact_id, {"image_path": image_path, "image_bytes_reference": image_path})
         previous_versions = [
             item
             for item in store.list_shareable_reports(investigation_id=investigation_id)

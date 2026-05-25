@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import Any
 
 import pandas as pd
 
-from source.product.branch_workspace import BranchWorkspaceManager
 from source.product.execution_planner import AuthoritativeQueryPlan, ExtremumScope, QueryFilter, TemporalSanityValidator
 from source.product.fallbacks.artifact_builders import build_histogram_artifact
-from source.product.fallbacks.semantic_resolution import CUSTOMER_LIKE_MARKERS, DELIVERY_DATE_MARKERS, ORDER_DATE_MARKERS, SALES_LIKE_MARKERS, SHIPPING_METHOD_MARKERS, resolve_categorical_value, resolve_dimension_column
+from source.product.fallbacks.semantic_resolution import CUSTOMER_LIKE_MARKERS, DELIVERY_DATE_MARKERS, LOCATION_LIKE_MARKERS, ORDER_DATE_MARKERS, SALES_LIKE_MARKERS, SHIPPING_METHOD_MARKERS, _looks_identifier_like, column_by_markers, resolve_categorical_value, resolve_dimension_column
 from source.product.fallbacks.shipping_analysis import build_delivery_delay_artifacts, compute_delivery_delay_analysis
 
 
@@ -36,7 +34,7 @@ class DirectQueryExecutor:
         if plan.intent == "bin_question":
             return cls._bins_followup(question, df, plan, context)
         if plan.intent == "shipping_delay":
-            return cls._shipping_delay(question, df, plan)
+            return cls._shipping_delay(question, df, plan, context)
         comparison = cls._distribution_comparison(question, df, plan, context)
         if comparison:
             return comparison
@@ -261,6 +259,20 @@ class DirectQueryExecutor:
     def _histogram(question: str, df: pd.DataFrame, plan: AuthoritativeQueryPlan) -> dict[str, Any] | None:
         if not plan.metric or plan.metric not in df.columns:
             return None
+        # --- Unresolved filter detection ---
+        # If the user explicitly mentioned a filter term (e.g. "in Tokyo") but it
+        # wasn't found in any compatible dimension column, report it clearly
+        # instead of silently building an unfiltered histogram.
+        if plan.unresolved_filter_terms and not plan.filters:
+            unresolved_term = plan.unresolved_filter_terms[0]
+            location_columns = [str(c) for c in df.columns if column_by_markers([str(c)], LOCATION_LIKE_MARKERS)]
+            location_info = f" (`{'`, `'.join(location_columns)}`)" if location_columns else ""
+            summary = (
+                f"I found `{plan.metric}` in the selected dataset, but no `{unresolved_term}` records "
+                f"were found in compatible location fields{location_info}. "
+                f"The available values may not include this location."
+            )
+            return _result(question, summary, plan, [], analysis_type="filter_not_found")
         working = _apply_filters(df, plan.filters)
         values = pd.to_numeric(working[plan.metric], errors="coerce").dropna()
         if values.empty:
@@ -368,14 +380,16 @@ class DirectQueryExecutor:
         return result
 
     @staticmethod
-    def _shipping_delay(question: str, df: pd.DataFrame, plan: AuthoritativeQueryPlan) -> dict[str, Any] | None:
-        metric = plan.metric if plan.metric in df.columns else _metric_from_question(question, df)
-        order_col = _column_by_markers(df, ORDER_DATE_MARKERS)
-        ship_col = _column_by_markers(df, DELIVERY_DATE_MARKERS)
+    def _shipping_delay(question: str, df: pd.DataFrame, plan: AuthoritativeQueryPlan, context: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        metric, clarification = _shipping_growth_metric(question, df, plan, context or {})
+        if clarification:
+            return _result(question, clarification, plan, [], analysis_type="growth_metric_clarification")
+        order_col = _column_by_markers_df(df, ORDER_DATE_MARKERS)
+        ship_col = _column_by_markers_df(df, DELIVERY_DATE_MARKERS)
         if not metric or not order_col or not ship_col:
             return None
         issues = TemporalSanityValidator.delivery_delay_issues(df, order_col, ship_col)
-        method_col = _column_by_markers(df, SHIPPING_METHOD_MARKERS)
+        method_col = _column_by_markers_df(df, SHIPPING_METHOD_MARKERS)
         analysis = compute_delivery_delay_analysis(df, metric=metric, order_column=order_col, delivery_column=ship_col, method_column=method_col)
         if not analysis:
             return None
@@ -548,11 +562,11 @@ def _extremum_dimension(question: str, df: pd.DataFrame, plan: AuthoritativeQuer
     if plan.dimension and plan.dimension in df.columns:
         return plan.dimension
     if any(marker in normalized for marker in ("customer", "client", "клиент")):
-        return resolve_dimension_column(question, [str(col) for col in df.columns], metric=plan.metric, df=df) or _column_by_markers(df, CUSTOMER_LIKE_MARKERS)
+        return resolve_dimension_column(question, [str(col) for col in df.columns], metric=plan.metric, df=df) or column_by_markers([str(col) for col in df.columns], CUSTOMER_LIKE_MARKERS)
     if "city" in normalized or "город" in normalized:
-        return _column_by_markers(df, ("city", "город", "town", "location"))
+        return column_by_markers([str(col) for col in df.columns], ("city", "город", "town", "location"))
     if "order" in normalized:
-        return _column_by_markers(df, ("order id", "order_id", "order", "заказ"))
+        return column_by_markers([str(col) for col in df.columns], ("order id", "order_id", "order", "заказ"))
     return None
 
 
@@ -683,14 +697,9 @@ def _norm(value: str) -> str:
     return " ".join(str(value or "").casefold().split())
 
 
-def _column_by_markers(df: pd.DataFrame, markers: tuple[str, ...]) -> str | None:
-    best: tuple[int, str] | None = None
-    for column in df.columns:
-        normalized = _norm(str(column))
-        score = sum(20 + len(marker) for marker in markers if marker in normalized)
-        if score and (best is None or score > best[0]):
-            best = (score, str(column))
-    return best[1] if best else None
+def _column_by_markers_df(df: pd.DataFrame, markers: tuple[str, ...]) -> str | None:
+    """Convenience wrapper: calls canonical column_by_markers with df column names."""
+    return column_by_markers([str(col) for col in df.columns], markers)
 
 
 def _metric_from_question(question: str, df: pd.DataFrame) -> str | None:
@@ -704,11 +713,64 @@ def _metric_from_question(question: str, df: pd.DataFrame) -> str | None:
     )
     for markers in marker_groups:
         if any(marker in normalized for marker in markers):
-            match = _column_by_markers(df, markers)
+            match = _column_by_markers_df(df, markers)
             if match:
                 return match
-    numeric = [str(column) for column in df.select_dtypes(include="number").columns]
+    numeric = [str(column) for column in df.select_dtypes(include="number").columns if not _looks_identifier_like(df[column], str(column))]
     return numeric[0] if numeric else None
+
+
+def _shipping_growth_metric(question: str, df: pd.DataFrame, plan: AuthoritativeQueryPlan, context: dict[str, Any]) -> tuple[str | None, str | None]:
+    state = context.get("conversation_state") if isinstance(context.get("conversation_state"), dict) else {}
+    context_policy = str(state.get("context_policy") or (context.get("routing_decision") or {}).get("context_policy") or "")
+    candidate = _metric_from_question(question, df)
+    if candidate and _valid_growth_metric(candidate, df) and _business_like_metric_name(candidate):
+        return candidate, None
+    if plan.metric and _valid_growth_metric(plan.metric, df) and _metric_is_explicit_or_business_like(question, plan):
+        return plan.metric, None
+    if context_policy not in {"", "continue"}:
+        active_metric = ""
+    else:
+        active_metric = str(state.get("active_metric") or "").strip()
+    if _valid_growth_metric(active_metric, df):
+        return active_metric, None
+    alternatives = [str(column) for column in df.select_dtypes(include="number").columns if _valid_growth_metric(str(column), df)]
+    if any(marker in _norm(question) for marker in ("growth", "trend", "рост")):
+        suffix = f" Available metric-like fields: {', '.join(f'`{item}`' for item in alternatives[:5])}." if alternatives else ""
+        return None, f"Which metric should growth refer to? I will not use identifier-like fields such as row numbers, IDs, codes, or postal codes as growth metrics.{suffix}"
+    return candidate, None
+
+
+def _valid_growth_metric(metric: str, df: pd.DataFrame) -> bool:
+    return bool(metric and metric in df.columns and pd.api.types.is_numeric_dtype(df[metric]) and not _looks_identifier_like(df[metric], metric))
+
+
+def _metric_is_explicit_or_business_like(question: str, plan: AuthoritativeQueryPlan) -> bool:
+    metric = str(plan.metric or "")
+    if metric and _norm(metric) in _norm(question):
+        return True
+    if plan.metric_alias_used:
+        return True
+    return _business_like_metric_name(metric)
+
+
+def _business_like_metric_name(metric: str) -> bool:
+    normalized = _norm(metric)
+    markers = SALES_LIKE_MARKERS + (
+        "profit",
+        "margin",
+        "cost",
+        "expense",
+        "price",
+        "score",
+        "rating",
+        "quantity",
+        "amount",
+        "total",
+        "value",
+        "revenue",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def _bin_followup_summary(question: str, rows: list[dict[str, Any]], derived_field: str, metric: str) -> tuple[str, str]:
@@ -731,8 +793,13 @@ def _bin_followup_summary(question: str, rows: list[dict[str, Any]], derived_fie
         )
     if any(marker in normalized for marker in ("sparse", "small sample", "low sample", "few records", "малень", "редк")):
         counts = [int(row.get("record_count") or 0) for row in rows]
-        if counts and max(counts) - min(counts) <= 1:
-            return (f"No `{derived_field}` bins are materially sparse; the quantile strategy produced nearly balanced groups with {min(counts)} to {max(counts)} records per bin.", "bins_sparsity_balanced")
+        if counts:
+            min_count = min(counts)
+            median_count = float(pd.Series(counts).median())
+            max_count = max(counts)
+            imbalance_ratio = max_count / max(min_count, 1)
+            if (imbalance_ratio <= 1.25 or max_count - min_count <= 1) and min_count >= median_count * 0.5:
+                return (f"No `{derived_field}` bins are materially sparse; the quantile binning produced balanced groups with {min_count} to {max_count} records per bin.", "bins_sparsity_balanced")
         sparse = sorted(rows, key=lambda row: int(row.get("record_count") or 0))[:3]
         bits = ", ".join(f"`{row.get(derived_field)}` n={int(row.get('record_count') or 0)}" for row in sparse)
         return (f"Sparsest `{derived_field}` bins are {bits}. These bins need caution before comparing `{metric}` averages.", "bins_sparsity")

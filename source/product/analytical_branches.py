@@ -60,7 +60,7 @@ def route_branch_intent(question: str, state: dict[str, Any] | None = None) -> s
     temporal_context = branch in {BranchType.TREND_ANALYSIS.value, BranchType.TEMPORAL_DECOMPOSITION.value} or bool(
         (state or {}).get("active_time_axis")
     )
-    if temporal_context and any(marker in text for marker in ("shipping", "ship ", "ship mode", "delivery", "достав", "shipping behavior")):
+    if temporal_context and any(marker in text for marker in ("shipping", "delivery", "logistics", "fulfillment", "достав")):
         return "temporal_behavior_decomposition"
     if temporal_context and any(marker in text for marker in ("categor", "segment", "category", "категор", "сегмент", "объясняют рост", "explain growth")):
         return "temporal_decomposition"

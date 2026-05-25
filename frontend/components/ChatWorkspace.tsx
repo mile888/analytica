@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type {
   Artifact,
+  DataSource,
   Finding,
   Investigation,
   InvestigationBranch,
@@ -23,7 +24,8 @@ export function ChatWorkspace({
   findings,
   artifacts,
   suggestions,
-  branches = []
+  branches = [],
+  dataSources = []
 }: {
   investigation: Investigation;
   latestRun?: InvestigationRun;
@@ -32,6 +34,7 @@ export function ChatWorkspace({
   artifacts: Artifact[];
   suggestions: string[];
   branches?: InvestigationBranch[];
+  dataSources?: DataSource[];
 }) {
   const [optimisticFollowUps, setOptimisticFollowUps] = useState<Array<{ id: string; question: string }>>([]);
   const [initialRunPending, setInitialRunPending] = useState(false);
@@ -69,6 +72,8 @@ export function ChatWorkspace({
       );
   const visibleArtifacts = artifacts.filter((artifact) => artifact.visibility !== "hidden");
   const activeBranch = branches.find((branch) => branch.is_active);
+  const showDatasetDetails = dataSources.length > 1;
+  const dataSourceNames = new Map(dataSources.map((source) => [source.data_source_id, source.name]));
   const selectedBranchArtifacts = artifactsForBranch(visibleArtifacts, activeBranch?.branch_id);
   const relevantVisualArtifacts = visualAnalysisArtifacts(prioritizeArtifactsForBranch(visibleArtifacts, activeBranch?.branch_id));
   const relevantChartArtifacts = relevantVisualArtifacts.charts.slice(-2);
@@ -86,6 +91,14 @@ export function ChatWorkspace({
           <div className="min-w-0">
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <Chip>{investigation.linked_data_source_ids.length} dataset{investigation.linked_data_source_ids.length === 1 ? "" : "s"}</Chip>
+              {showDatasetDetails
+                ? dataSources.slice(0, 4).map((source) => (
+                    <Chip key={source.data_source_id}>{source.name}</Chip>
+                  ))
+                : null}
+              {showDatasetDetails && activeBranch?.dataset_ids?.length ? (
+                <Chip>Active: {activeBranch.dataset_ids.map((id) => dataSourceNames.get(id) || id).join(", ")}</Chip>
+              ) : null}
             </div>
             <h1 className="line-clamp-2 text-xl font-semibold tracking-tight text-slate-950 dark:text-slate-50 sm:text-2xl">
               {investigation.title}
@@ -136,12 +149,15 @@ export function ChatWorkspace({
                   artifact={artifact}
                   investigationId={investigation.investigation_id}
                   linkedDataSourceIds={investigation.linked_data_source_ids}
+                  datasetLabel={artifactDatasetLabel(artifact, dataSourceNames, showDatasetDetails)}
                 />
               ))}
               {relevantTableArtifacts.map((artifact) => (
                 <TableArtifactCard
                   key={artifact.artifact_id}
                   artifact={artifact}
+                  investigationId={investigation.investigation_id}
+                  datasetLabel={artifactDatasetLabel(artifact, dataSourceNames, showDatasetDetails)}
                 />
               ))}
             </div>
@@ -206,6 +222,15 @@ export function ChatWorkspace({
       />
     </section>
   );
+}
+
+function artifactDatasetLabel(artifact: Artifact, names: Map<string, string>, enabled: boolean): string {
+  if (!enabled) return "";
+  const metadata = artifact.metadata || {};
+  const ids = Array.isArray(metadata.dataset_ids) ? metadata.dataset_ids.map(String).filter(Boolean) : [];
+  const single = typeof metadata.dataset_id === "string" && metadata.dataset_id ? [metadata.dataset_id] : [];
+  const selected = ids.length ? ids : single;
+  return selected.map((id) => names.get(id) || id).join(", ");
 }
 
 function isUserLikeMessage(message: InvestigationMessage): boolean {

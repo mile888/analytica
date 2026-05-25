@@ -280,7 +280,9 @@ def export_shareable_report_pdf(report: ShareableReport, artifacts: list[Artifac
     with PdfPages(output) as pdf:
         _append_report_text_pages(pdf, plt, report)
         for artifact in _pdf_artifacts(report, artifacts or []):
-            if artifact.artifact_type == ArtifactType.CHART:
+            if artifact.artifact_type == ArtifactType.CHART and _artifact_image_path(artifact):
+                fig = _image_artifact_figure(plt, artifact)
+            elif artifact.artifact_type == ArtifactType.CHART:
                 fig = _chart_artifact_figure(plt, artifact)
             elif artifact.artifact_type == ArtifactType.TABLE:
                 fig = _table_artifact_figure(plt, artifact)
@@ -416,7 +418,7 @@ def _append_report_text_pages(pdf: Any, plt: Any, report: ShareableReport) -> No
     ]
     for section in sections:
         page_lines.extend([section.title, ""])
-        page_lines.extend(_wrap_pdf_text(section.content or "No content.", width=92))
+        page_lines.extend(_report_section_pdf_lines(section))
         page_lines.append("")
     for chunk in _chunk_lines(page_lines, 42):
         fig = plt.figure(figsize=(8.27, 11.69))
@@ -440,6 +442,33 @@ def _append_report_text_pages(pdf: Any, plt: Any, report: ShareableReport) -> No
             y -= 0.045 if is_title or is_section else 0.026
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
+
+
+def _report_section_pdf_lines(section: ReportSection) -> list[str]:
+    if section.section_type == "transcript":
+        return _transcript_pdf_lines(section.content or "No content.")
+    if section.section_type == "visual_analysis" and section.source_artifact_ids:
+        return _wrap_pdf_text(section.content or "Selected report artifacts are rendered on the following pages.", width=92)
+    return _wrap_pdf_text(section.content or "No content.", width=92)
+
+
+def _transcript_pdf_lines(content: str) -> list[str]:
+    blocks = [block.strip() for block in content.split("\n\n") if block.strip()]
+    lines: list[str] = []
+    for block in blocks:
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if ". Question:" in line:
+                prefix, value = line.split("Question:", 1)
+                lines.extend(_wrap_pdf_text(f"{prefix}Question: {value.strip()}", width=88))
+            elif line.startswith("Answer:"):
+                lines.extend(_wrap_pdf_text(f"   Answer: {line.removeprefix('Answer:').strip()}", width=88))
+            else:
+                lines.extend(_wrap_pdf_text(line, width=88))
+        lines.append("")
+    return lines or _wrap_pdf_text(content, width=92)
 
 
 def _pdf_artifacts(report: ShareableReport, artifacts: list[Artifact]) -> list[Artifact]:
@@ -505,6 +534,41 @@ def _chart_artifact_figure(plt: Any, artifact: Artifact) -> Any | None:
     ax.spines["right"].set_visible(False)
     fig.tight_layout()
     return fig
+
+
+def _artifact_image_path(artifact: Artifact) -> str:
+    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+    return str(metadata.get("image_path") or metadata.get("image_bytes_reference") or "")
+
+
+def _image_artifact_figure(plt: Any, artifact: Artifact) -> Any | None:
+    from pathlib import Path
+
+    path = _artifact_image_path(artifact)
+    if not path or not Path(path).exists():
+        return None
+    image = plt.imread(path)
+    fig, ax = plt.subplots(figsize=(9.5, 6.2))
+    fig.patch.set_facecolor("white")
+    ax.imshow(image)
+    ax.axis("off")
+    title = artifact.title or "Chart"
+    caption = _artifact_pdf_caption(artifact)
+    ax.set_title(title, fontsize=14, fontweight="bold", loc="left", pad=10)
+    if caption:
+        fig.text(0.08, 0.025, caption, fontsize=8.5, color="#4b5563", wrap=True)
+    fig.tight_layout(rect=[0, 0.05, 1, 0.96])
+    return fig
+
+
+def _artifact_pdf_caption(artifact: Artifact) -> str:
+    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+    parts = []
+    for label, key in (("Metric", "metric"), ("Dimension", "dimension"), ("Dataset", "dataset_id"), ("Question", "created_from_query")):
+        value = metadata.get(key)
+        if value:
+            parts.append(f"{label}: {value}")
+    return " | ".join(parts)
 
 
 def _table_artifact_figure(plt: Any, artifact: Artifact) -> Any | None:

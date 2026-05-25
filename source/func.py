@@ -42,7 +42,6 @@ def get_engine(df: Any, engine: Optional[str] = None) -> BaseEngine:
     return create_engine(name)
 
 
-
 def preview_result(result: Any, max_chars: int = 800) -> str:
     try:
         if isinstance(result, pd.DataFrame):
@@ -144,7 +143,6 @@ def preview_result_and_facts(result: Any, err: Optional[str]) -> tuple[str, str,
     rp = preview_result(result)
     facts = f"scalar type={type(result).__name__}; value_preview={rp}"
     return "scalar", rp, facts, ""
-
 
 
 _CODE_BLOCK_RE = re.compile(r"```python\s*(.*?)```", re.DOTALL | re.IGNORECASE)

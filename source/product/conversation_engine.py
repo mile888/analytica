@@ -57,14 +57,15 @@ def _chart_explanation_response(question: str, artifacts: list[Any], state: dict
     action = context.get("active_message_metadata") if isinstance(context.get("active_message_metadata"), dict) else {}
     if action.get("action") != "explain_artifact" and not _is_chart_explanation_question(question):
         return None
-    active_artifact_id = str(action.get("artifact_id") or state.get("active_artifact_id") or "").strip()
+    active_artifact_id = str(action.get("artifact_id") or "").strip()
     strict_artifact = action.get("action") == "explain_artifact" and bool(active_artifact_id)
     chart = _resolve_chart_artifact(question, artifacts, artifact_id=active_artifact_id)
     if not chart:
         if strict_artifact:
             text = f"I cannot explain this chart because the exact artifact `{active_artifact_id}` is not available in the current artifact payload."
             return ConversationResponse(text=text, findings=[text], response_kind="chart_explanation")
-        return None
+        text = "I do not currently have a chart to explain. Ask a specific analytical question or select a chart first."
+        return ConversationResponse(text=text, findings=[text], response_kind="chart_explanation")
     content = _content(chart)
     metadata = _metadata(chart)
     rows = _artifact_rows(chart)
@@ -158,12 +159,12 @@ def _histogram_explanation(title: str, metric: str, dimension: str, rows: list[d
     peak_idx = max(range(len(counts)), key=lambda idx: counts[idx])
     first_count = counts[0]
     last_count = counts[-1]
-    tail = "heavier upper tail" if last_count > first_count else "heavier lower tail" if first_count > last_count else "balanced tails"
+    tail = "more records at the high end" if last_count > first_count else "more records at the low end" if first_count > last_count else "roughly balanced across the range"
     concentration = counts[peak_idx] / total * 100.0
     return (
         f"`{title}` shows the distribution of `{metric}`{filter_text}. "
         f"The densest bin is `{labels[peak_idx]}` with {counts[peak_idx]} records ({concentration:.1f}% of the displayed rows). "
-        f"The tails are {tail}, and the full bin range indicates the spread and possible outliers."
+        f"The shape has {tail}, which hints at where typical values cluster and where outliers may sit."
     )
 
 
@@ -250,7 +251,7 @@ def _grouped_chart_explanation(title: str, metric: str, dimension: str, rows: li
     return (
         f"`{title}` ranks `{dimension}` by {aggregation_label} `{metric}`{filter_text}. "
         f"{leader_bits} lead the displayed values; the top-two gap is {gap:.2f}.{tail} "
-        f"The main takeaway is the size of the ranking gap and how concentrated `{metric}` is among the leading groups."
+        f"A large gap at the top suggests `{metric}` may depend on a few dominant groups rather than a broad base."
     )
 
 
@@ -283,7 +284,7 @@ def route_conversation_intent(question: str, *, has_active_context: bool) -> str
     transformation_reference = any(marker in text for marker in ("остаются", "остались", "после", "after", "remain", "remains", "лидерами", "лидеры", "просели", "dropped", "shift"))
     if has_active_context and transformation_reference:
         return "post_transformation_followup"
-    if any(marker in text for marker in ("shipping", "ship ", "ship mode", "delivery", "достав", "shipping behavior")):
+    if any(marker in text for marker in ("shipping", "delivery", "logistics", "fulfillment", "достав")):
         return "unknown"
     if has_active_context and any(marker in text for marker in ("это", "этот", "эта", "these", "this", "that")):
         return "clarification_needed"
@@ -366,6 +367,9 @@ def response_quality_gate(
         "saved finding",
         "move beyond the repeated summary",
         "the active target is",
+        "the active comparison is still",
+        "the current evidence centers on",
+        "judge it by the leading",
         "the contradiction check should stay",
         "the evidence supports",
         "the evidence is a ",
@@ -395,7 +399,7 @@ def response_quality_gate(
         if target_mechanism and target_mechanism not in text and target_mechanism.replace("_", " ") not in text:
             mechanism_words = [part for part in target_mechanism.split("_") if len(part) >= 5]
             mechanism_ok = any(part in text for part in mechanism_words)
-            if target_mechanism == "operational_effect" and any(part in text for part in ("delay", "shipping", "ship mode")):
+            if target_mechanism == "operational_effect" and any(part in text for part in ("delay", "shipping", "delivery", "logistics", "fulfillment", "processing", "lead time", "transit", "dispatch")):
                 mechanism_ok = True
             if target_mechanism == "sparse_group_instability" and any(part in text for part in ("n=", "sample", "sparse")):
                 mechanism_ok = True
@@ -415,7 +419,7 @@ def response_quality_gate(
         return False, "generic_affected_findings"
     if any(marker in question_text for marker in ("city", "cities", "город")) and "`country`" in text:
         return False, "ignored_explicit_city"
-    if "standard class" in question_text and "`country`" in text:
+    if _question_mentions_specific_value(question_text) and "`country`" in text and not _response_addresses_mentioned_value(question_text, text):
         return False, "ignored_category_value"
     if _is_hypothesis_question(question_text):
         if "the active conclusion is" in text:
@@ -426,7 +430,7 @@ def response_quality_gate(
             return False, "generic_hypothesis_template"
         if "technology" in question_text and "`segment`" in text and "`category`" not in text:
             return False, "ignored_explicit_hypothesis_entity"
-        if "standard class" in question_text and "`ship mode`" not in text:
+        if _question_mentions_specific_value(question_text) and not _response_addresses_mentioned_value(question_text, text):
             return False, "ignored_explicit_hypothesis_value"
         if any(marker in question_text for marker in ("city", "cities", "город")) and "`city`" not in text:
             return False, "ignored_hypothesis_dimension"
@@ -444,6 +448,10 @@ def response_quality_gate(
     system_like = ("this continues the current chart scope", "this is a temporal trend calculation", "i ranked all groups", "i ranked all `")
     if any(marker in text for marker in system_like):
         return False, "system_like_analytical_language"
+    if _uses_identifier_as_metric(text):
+        return False, "identifier_used_as_metric"
+    if _has_excessive_generic_filler(text):
+        return False, "excessive_generic_business_filler"
     return True, ""
 
 
@@ -516,19 +524,20 @@ def _looks_like_grouped_country_answer(text: str) -> bool:
 
 
 def _is_shipping_behavior_question(text: str) -> bool:
-    return any(marker in text for marker in ("shipping", "ship ", "ship mode", "delivery", "достав"))
+    return any(marker in text for marker in ("shipping", "delivery", "logistics", "fulfillment", "достав"))
 
 
 def _looks_like_raw_ship_date_grouping(text: str) -> bool:
-    return "`ship date`" in text and any(
+    date_col_markers = ("`ship date`", "`order date`", "`event date`", "`delivery date`", "`created date`")
+    has_date_col = any(marker in text for marker in date_col_markers)
+    if not has_date_col:
+        return False
+    return any(
         marker in text
         for marker in (
-            "ship date contributors",
-            "`ship date` contributors",
-            "groups by `ship date`",
-            "over time by `ship date`",
-            "ranked all `ship date`",
-            "compared `sales` over time by `ship date`",
+            "contributors",
+            "groups by `",
+            "ranked all `",
         )
     )
 
@@ -698,7 +707,7 @@ def _hypothesis_response(
             base += " Проверять ее нужно сравнением raw average, median, adjusted average и group count."
     else:
         base = (
-            f"Hypothesis: differences in `{metric}` across `{dimension}` may be explained by extreme records, sample size, and record volume rather than stable group strength."
+            f"Hypothesis: differences in `{metric}` across `{dimension}` are driven by extreme records, sample size, and record volume more than stable group strength."
         )
         if adjusted:
             base += " After removing extreme records, raw leaders shift or drop, so the original ranking may be outlier-driven; stronger leaders should remain high in adjusted or median rankings with sufficient n."
@@ -955,7 +964,34 @@ def _looks_like_wrong_metric_answer(text: str, active_metric: str) -> bool:
 def _looks_like_wrong_dimension_answer(text: str, active_dimension: str) -> bool:
     if _normalize(active_dimension) in text:
         return False
-    return "ship mode" in text or "`ship mode`" in text
+    return False
+
+
+def _question_mentions_specific_value(question: str) -> bool:
+    """Detect if the question mentions a specific categorical value (e.g., 'Standard Class', 'Drama', 'West')."""
+    import re
+    text = question.lower()
+    has_quoted = bool(re.search(r'["\'\u00ab\u201c].+?["\'\u00bb\u201d]', question))
+    has_capitalized_phrase = bool(re.search(r'[A-Z][a-z]+\s+[A-Z][a-z]+', question))
+    has_specific_value_words = any(
+        marker in text
+        for marker in ("standard class", "first class", "same day", "second class", "economy", "premium", "regular")
+    )
+    return has_quoted or has_capitalized_phrase or has_specific_value_words
+
+
+def _response_addresses_mentioned_value(question: str, response: str) -> bool:
+    """Check if the response references the specific value mentioned in the question."""
+    import re
+    quoted = re.findall(r'["\'\u00ab\u201c](.+?)["\'\u00bb\u201d]', question)
+    for value in quoted:
+        if value.lower() in response:
+            return True
+    capitalized = re.findall(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)', question)
+    for phrase in capitalized:
+        if phrase.lower() in response:
+            return True
+    return not quoted and not capitalized
 
 
 def _first_existing_key(row: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -977,3 +1013,39 @@ def _topic(metric: str, dimension: str) -> str:
 
 def _normalize(value: str) -> str:
     return " ".join(str(value or "").replace("_", " ").replace("-", " ").lower().split())
+
+
+def _uses_identifier_as_metric(text: str) -> bool:
+    """Detect responses that use identifier columns as analytical metrics."""
+    import re
+    identifier_metric_patterns = (
+        r"`row id`\s+(?:by|across|per)\s+`",
+        r"`order id`\s+(?:by|across|per)\s+`",
+        r"`customer id`\s+(?:by|across|per)\s+`",
+        r"`product id`\s+(?:by|across|per)\s+`",
+        r"`invoice id`\s+(?:by|across|per)\s+`",
+        r"`transaction id`\s+(?:by|across|per)\s+`",
+        r"average\s+`(?:row id|order id|customer id|product id)`",
+        r"sum\s+(?:of\s+)?`(?:row id|order id|customer id|product id)`",
+    )
+    for pattern in identifier_metric_patterns:
+        if re.search(pattern, text):
+            return True
+    return False
+
+
+def _has_excessive_generic_filler(text: str) -> bool:
+    """Detect responses with excessive generic business filler instead of data-grounded answers."""
+    filler_phrases = (
+        "operational optimization",
+        "forecasting stability",
+        "operational risk",
+        "operational insight",
+        "prioritization framework",
+        "strategic implications",
+        "business risk assessment",
+        "validate with outlier check",
+        "strong enough for prioritization",
+    )
+    count = sum(1 for phrase in filler_phrases if phrase in text)
+    return count >= 2

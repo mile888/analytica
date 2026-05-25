@@ -104,6 +104,7 @@ def _build_system_prompt(tool_names: list[str]) -> str:
     return f"""You are Analytica, a Deep Agents analytical copilot for tabular data.
 
 Use the available Deep Agents skills for detailed workflows and the custom analytics tools for execution: {tools}.
+High-value skills include branch-continuation-policy, multi-dataset-reasoning, executive-analyst-reasoning, and analyst-response-style. Apply them when routing branch context, answering cross-dataset questions, or writing executive/business synthesis.
 
 Core operating rules:
 1. Inspect schema, create and validate an authoritative query plan, then route it through the branch workspace before execution.
@@ -170,15 +171,19 @@ def _guess_skills(query: str) -> list[str]:
     needs_sql = any(marker in q for marker in sql_markers)
     needs_data = needs_visual or needs_sql or any(marker in q for marker in data_markers)
     if not needs_data:
-        return ["business-analysis", "reporting"]
+        return ["business-analysis", "executive-analyst-reasoning", "analyst-response-style", "branch-continuation-policy", "reporting"]
 
-    skills = ["data-analysis", "csv-dataframe-analysis"]
+    skills = ["data-analysis", "csv-dataframe-analysis", "branch-continuation-policy", "analyst-response-style"]
     if needs_sql:
         skills.append("sql-querying")
     if needs_visual:
         skills.append("visualization")
     if any(marker in q for marker in code_markers):
         skills.append("code-execution-safety")
+    if any(marker in q for marker in ("dataset", "datasets", "join", "merge", "warehouse", "both", "shared", "across", "missing link", "unified analytics", "connect these datasets")):
+        skills.append("multi-dataset-reasoning")
+    if any(marker in q for marker in ("risk", "executive", "strategy", "strategic", "customer behavior", "management", "insight", "business", "product manager", "recommend", "hypothesis")):
+        skills.append("executive-analyst-reasoning")
     skills.append("reporting")
     return skills
 
@@ -186,6 +191,10 @@ def _guess_skills(query: str) -> list[str]:
 def _tools_for_skills(skills: list[str]) -> list[str]:
     tool_map = {
         "business-analysis": [],
+        "branch-continuation-policy": [],
+        "multi-dataset-reasoning": [],
+        "executive-analyst-reasoning": [],
+        "analyst-response-style": [],
         "code-execution-safety": ["run_python_analysis"],
         "csv-dataframe-analysis": ["inspect_dataset_schema", "top_n", "find_drops", "run_python_analysis"],
         "data-analysis": ["inspect_dataset_schema", "top_n", "find_drops", "run_python_analysis", "write_report_artifact"],

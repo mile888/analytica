@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from source.api.app import app
@@ -48,6 +49,7 @@ def _run_followup(store: InvestigationStore, service: InvestigationRunService, i
     ][-1]
 
 
+@pytest.mark.integration
 def test_explicit_top_customers_overrides_transformed_city_branch() -> None:
     df = _workspace_df()
     store = InvestigationStore()
@@ -398,6 +400,7 @@ def test_explain_histogram_comparison_artifact_stays_distribution_grounded() -> 
     assert "ranks `Location`" not in result["final_answer"]
 
 
+@pytest.mark.integration
 def test_explain_artifact_action_activates_artifact_branch() -> None:
     df = pd.DataFrame({"Sales": [253608.90, 175851.34], "City": ["New York City", "Los Angeles"]})
     store = InvestigationStore()
@@ -450,6 +453,7 @@ def test_explain_artifact_action_activates_artifact_branch() -> None:
     assert "total `Sales`" in updated.report.summary
 
 
+@pytest.mark.integration
 def test_explain_artifact_action_can_resolve_displayed_chart_outside_recent_tail() -> None:
     df = _workspace_df()
     store = InvestigationStore()
@@ -551,6 +555,77 @@ def test_distribution_followup_compares_against_second_city() -> None:
     assert "tail effects" in result["final_answer"]
 
 
+def test_service_histogram_la_compare_sf_stays_distribution() -> None:
+    df = _workspace_df()
+    store = InvestigationStore()
+    investigation = store.create_investigation("Distribution continuity")
+    service = InvestigationRunService(store)
+
+    first = _run_followup(store, service, investigation.investigation_id, df, "Build histogram of Sales in LA")
+    second = _run_followup(store, service, investigation.investigation_id, df, "Compare against SF")
+    updated = store.get_investigation(investigation.investigation_id)
+
+    assert "Filter: `City` = `Los Angeles`" in first
+    assert "distribution comparison" in second
+    assert "Los Angeles" in second
+    assert "San Francisco" in second
+    assert "Segment" not in second
+    state = updated.metadata["conversation_state"]
+    assert state["distribution_state"]["filters"][0]["column"] == "City"
+    assert state["distribution_state"]["filters"][0]["value"] == "Los Angeles"
+
+
+def test_text_only_explain_chart_uses_latest_visible_chart_not_stale_state_artifact() -> None:
+    stale = {
+        "artifact_id": "stale_grouped",
+        "artifact_type": "chart",
+        "title": "Sales by Sub-Category",
+        "content": {
+            "chart_type": "bar",
+            "metric": "Sales",
+            "dimension": "Sub-Category",
+            "x": "Sub-Category",
+            "y": "sum",
+            "rows": [{"Sub-Category": "Tables", "sum": 100.0}],
+        },
+        "metadata": {"metric": "Sales", "dimension": "Sub-Category", "aggregation": "sum"},
+    }
+    latest = {
+        "artifact_id": "latest_hist_compare",
+        "artifact_type": "chart",
+        "title": "Sales distribution comparison",
+        "content": {
+            "chart_type": "histogram",
+            "visualization_type": "histogram",
+            "metric": "Sales",
+            "series": "City",
+            "row_count": 4,
+            "comparison_groups": [
+                {"group": "Los Angeles", "row_count": 2, "mean": 70.0, "median": 70.0, "bins": [{"label": "40-100", "count": 2}]},
+                {"group": "San Francisco", "row_count": 2, "mean": 190.0, "median": 190.0, "bins": [{"label": "80-300", "count": 2}]},
+            ],
+        },
+        "metadata": {"metric": "Sales", "dimension": "City", "chart_type": "histogram", "branch_type": "distribution_comparison"},
+    }
+
+    result = deterministic_investigation_fallback(
+        "Explain this chart",
+        _workspace_df(),
+        data_context={
+            "conversation_context": {
+                "conversation_state": {"active_artifact_id": "stale_grouped", "active_metric": "Sales", "active_dimension": "Sub-Category"},
+                "recent_artifacts": [stale, latest],
+            }
+        },
+    )
+
+    assert result["trace_metadata"]["analysis_type"] == "chart_explanation"
+    assert "histogram comparison" in result["final_answer"]
+    assert "Los Angeles" in result["final_answer"]
+    assert "San Francisco" in result["final_answer"]
+    assert "Sub-Category" not in result["final_answer"]
+
+
 def test_histogram_artifact_has_ordered_distribution_shape() -> None:
     result = deterministic_investigation_fallback("Build a histogram of Sales in Los Angeles", _workspace_df())
     content = result["artifacts"][0]["content"]
@@ -591,6 +666,42 @@ def test_shipping_delay_relationship_runs_delay_check_not_generic_trend() -> Non
     assert "delivery_delay_days" in answer
     assert "Growth periods" in answer
     assert "relationship" in answer
+    assert result["trace_metadata"]["analysis_type"] == "growth_delay_relationship"
+
+
+def test_growth_delay_relationship_does_not_use_numeric_identifier_without_metric() -> None:
+    df = pd.DataFrame(
+        {
+            "Row ID": [101, 102, 103, 104, 105, 106],
+            "Measurement": [10.0, 12.0, 13.0, 16.0, 14.0, 18.0],
+            "Order Date": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01", "2024-05-01", "2024-06-01"]),
+            "Ship Date": pd.to_datetime(["2024-01-03", "2024-02-04", "2024-03-04", "2024-04-07", "2024-05-03", "2024-06-08"]),
+        }
+    )
+
+    result = deterministic_investigation_fallback("Is growth related to delivery delays?", df)
+
+    assert "Row ID growth" not in result["final_answer"]
+    assert "`Row ID` growth" not in result["final_answer"]
+    assert "Which metric should growth refer to?" in result["final_answer"]
+    assert result["trace_metadata"]["analysis_type"] == "growth_metric_clarification"
+
+
+def test_growth_delay_relationship_uses_active_metric_not_numeric_identifier() -> None:
+    df = pd.DataFrame(
+        {
+            "Row ID": [101, 102, 103, 104, 105, 106],
+            "Revenue": [10.0, 12.0, 18.0, 17.0, 25.0, 30.0],
+            "Order Date": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01", "2024-05-01", "2024-06-01"]),
+            "Ship Date": pd.to_datetime(["2024-01-03", "2024-02-04", "2024-03-04", "2024-04-07", "2024-05-03", "2024-06-08"]),
+        }
+    )
+    context = {"conversation_state": {"active_metric": "Revenue"}}
+
+    result = deterministic_investigation_fallback("Is growth related to delivery delays?", df, data_context={"conversation_context": context})
+
+    assert "`Revenue` growth is compared with derived `delivery_delay_days`" in result["final_answer"]
+    assert "`Row ID` growth" not in result["final_answer"]
     assert result["trace_metadata"]["analysis_type"] == "growth_delay_relationship"
 
 
@@ -650,14 +761,20 @@ def test_branch_list_api_and_activation() -> None:
     assert reloaded.metadata["conversation_state"].get("active_artifact_id")
 
 
-def test_invalid_branch_activation_returns_safe_error() -> None:
+def test_invalid_branch_activation_returns_graceful_response() -> None:
+    """Stale/missing branch activation is graceful — returns 200 with current branches.
+
+    This prevents the 'Branch not found' 404 that broke chart explanation when
+    artifact metadata contained a stale branch ID after investigation updates.
+    """
     store = get_store()
     investigation = store.create_investigation("Invalid branch API test")
 
     client = TestClient(app)
     activated = client.post(f"/investigations/{investigation.investigation_id}/branches/not-a-branch/activate")
 
-    assert activated.status_code == 404
+    assert activated.status_code == 200
+    assert "branches" in activated.json()
 
 
 def test_manual_distribution_branch_context_routes_vague_followup() -> None:
@@ -711,6 +828,7 @@ def test_active_distribution_branch_executes_seattle_comparison() -> None:
     assert "tail effects" in answer
 
 
+@pytest.mark.integration
 def test_explicit_task_after_manual_branch_switches_automatically() -> None:
     df = _workspace_df()
     store = InvestigationStore()
@@ -795,3 +913,207 @@ def test_outlier_adjusted_ranking_avoids_single_row_leaders() -> None:
     assert rows
     assert all(int(row["count"]) > 1 for row in rows[:5])
     assert "Jamestown" not in [row["City"] for row in rows[:5]]
+
+
+def test_explain_adjusted_chart_uses_latest_transformed_artifact() -> None:
+    df = pd.DataFrame(
+        {
+            "Sales": [
+                10000, 9000, 8000,
+                500, 520, 510,
+                480, 490, 470,
+                460, 455, 465,
+                450, 440, 445,
+            ],
+            "City": [
+                "Jamestown", "Cheyenne", "Bellingham",
+                "Missoula", "Missoula", "Missoula",
+                "Murrieta", "Murrieta", "Murrieta",
+                "Whittier", "Whittier", "Whittier",
+                "El Cajon", "El Cajon", "El Cajon",
+            ],
+        }
+    )
+    transformed = deterministic_investigation_fallback(
+        "Remove outliers",
+        df,
+        data_context={"conversation_context": {"conversation_state": {"active_metric": "Sales", "active_dimension": "City"}}},
+    )
+    context = {
+        "conversation_state": {
+            "active_metric": "Sales",
+            "active_dimension": "City",
+            "active_transformation_result": transformed["trace_metadata"]["active_transformation_result"],
+        },
+        "recent_artifacts": transformed["artifacts"],
+    }
+
+    result = deterministic_investigation_fallback("Explain the adjusted chart", df, data_context={"conversation_context": context})
+
+    assert result["trace_metadata"]["analysis_type"] == "chart_explanation"
+    assert "after remove outliers" in result["final_answer"]
+    assert "Groups that weaken most" in result["final_answer"]
+    assert "`City`" in result["final_answer"]
+    assert "Sub-Category" not in result["final_answer"]
+
+
+@pytest.mark.integration
+def test_service_transformed_artifact_lineage_is_persisted_for_adjusted_explanation() -> None:
+    df = _workspace_df()
+    store = InvestigationStore()
+    investigation = store.create_investigation("Top cities by Sales")
+    service = InvestigationRunService(store)
+
+    _run_followup(store, service, investigation.investigation_id, df, "Top cities by Sales")
+    base_chart_id = next(
+        artifact.artifact_id
+        for artifact in store.get_investigation(investigation.investigation_id).artifacts
+        if getattr(getattr(artifact, "artifact_type", None), "value", getattr(artifact, "artifact_type", None)) == "chart"
+    )
+    _run_followup(store, service, investigation.investigation_id, df, "Remove outliers")
+    updated = store.get_investigation(investigation.investigation_id)
+    adjusted = next(
+        artifact
+        for artifact in reversed(updated.artifacts)
+        if artifact.metadata.get("transformation_type") == "remove_outliers"
+        and getattr(getattr(artifact, "artifact_type", None), "value", getattr(artifact, "artifact_type", None)) == "chart"
+    )
+
+    assert adjusted.metadata.get("parent_artifact_id") == base_chart_id
+    assert adjusted.metadata.get("base_artifact_id") == base_chart_id
+
+    answer = _run_followup(store, service, investigation.investigation_id, df, "Explain the adjusted chart")
+
+    assert "after remove outliers" in answer
+    assert "City" in answer
+    assert "Sub-Category" not in answer
+
+
+@pytest.mark.integration
+def test_final_reliability_acceptance_flow_stays_artifact_grounded() -> None:
+    df = _workspace_df()
+    store = InvestigationStore()
+    investigation = store.create_investigation("Acceptance flow")
+    service = InvestigationRunService(store)
+
+    answers = {
+        "city_revenue": _run_followup(store, service, investigation.investigation_id, df, "выручка по городам"),
+        "histogram": _run_followup(store, service, investigation.investigation_id, df, "Build histogram of Sales in LA"),
+        "comparison": _run_followup(store, service, investigation.investigation_id, df, "Compare against SF"),
+        "explain_histogram": _run_followup(store, service, investigation.investigation_id, df, "Explain this chart"),
+        "top_cities": _run_followup(store, service, investigation.investigation_id, df, "Top cities by Sales"),
+        "outliers": _run_followup(store, service, investigation.investigation_id, df, "Remove outliers"),
+        "leaders": _run_followup(store, service, investigation.investigation_id, df, "Which cities remain leaders?"),
+        "adjusted": _run_followup(store, service, investigation.investigation_id, df, "Explain the adjusted chart"),
+        "bins": _run_followup(store, service, investigation.investigation_id, df, "Create bins automatically from Sales"),
+        "sparse": _run_followup(store, service, investigation.investigation_id, df, "Which bins are sparse?"),
+        "growth": _run_followup(store, service, investigation.investigation_id, df, "Is growth related to shipping delays?"),
+        "fields": _run_followup(store, service, investigation.investigation_id, df, "What fields are most important here?"),
+        "questions": _run_followup(store, service, investigation.investigation_id, df, "What business questions can we investigate?"),
+    }
+
+    assert "Filter: `City` = `Los Angeles`" in answers["histogram"]
+    assert "distribution comparison" in answers["comparison"]
+    assert "Los Angeles" in answers["comparison"]
+    assert "San Francisco" in answers["comparison"]
+    assert "histogram comparison" in answers["explain_histogram"]
+    assert "Sub-Category" not in answers["explain_histogram"]
+    assert "after remove outliers" in answers["adjusted"]
+    assert "City" in answers["adjusted"]
+    assert "No `Sales_bin` bins are materially sparse" in answers["sparse"]
+    assert "`Sales` growth is compared with derived `delivery_delay_days`" in answers["growth"]
+    assert "`Row ID` growth" not in answers["growth"]
+    assert "metric set" in answers["fields"].lower()
+    assert "`City`" in answers["fields"]
+    assert "investigation questions" in answers["questions"].lower()
+    assert all("Sub-Category" not in answer for answer in answers.values())
+
+
+def test_explain_artifact_endpoint_resolves_without_branch() -> None:
+    """The /artifacts/{artifact_id}/explain endpoint resolves chart context
+    without requiring branch activation — artifact-first resolution."""
+    store = get_store()
+    investigation = store.create_investigation("Explain endpoint test")
+    chart = Artifact(
+        artifact_type=ArtifactType.CHART,
+        title="Sales distribution in LA",
+        content={
+            "chart_type": "histogram",
+            "metric": "Sales",
+            "bins": [
+                {"left": 0, "right": 100, "label": "0-100", "count": 245},
+                {"left": 100, "right": 200, "label": "100-200", "count": 180},
+            ],
+            "filters": [{"column": "City", "operator": "equals", "value": "Los Angeles"}],
+            "row_count": 728,
+        },
+        metadata={"dataset_id": "ds_1", "metric": "Sales", "chart_type": "histogram"},
+    )
+    store.add_artifact(investigation.investigation_id, chart)
+
+    client = TestClient(app)
+    response = client.post(
+        f"/investigations/{investigation.investigation_id}/artifacts/{chart.artifact_id}/explain"
+    )
+
+    assert response.status_code == 200
+    ctx = response.json()
+    assert ctx["request_type"] == "EXPLAIN_ARTIFACT"
+    assert ctx["artifact_id"] == chart.artifact_id
+    assert ctx["chart_type"] == "histogram"
+    assert ctx["metric"] == "Sales"
+    assert ctx["bins"] == 2
+    assert ctx["summary"]["total_records"] == 425
+    assert ctx["summary"]["peak_bin_count"] == 245
+    assert ctx["branch_id"] == ""  # No branch required
+
+
+def test_explain_artifact_endpoint_missing_artifact_returns_clear_error() -> None:
+    """Missing artifacts return 'Artifact not found', NOT 'Branch not found'."""
+    store = get_store()
+    investigation = store.create_investigation("Explain missing test")
+
+    client = TestClient(app)
+    response = client.post(
+        f"/investigations/{investigation.investigation_id}/artifacts/nonexistent_chart/explain"
+    )
+
+    assert response.status_code == 404
+    assert "Artifact not found" in response.json()["detail"]
+    assert "Branch not found" not in response.json()["detail"]
+
+
+def test_explain_artifact_endpoint_bar_chart_context() -> None:
+    """Bar chart artifacts return dimension and metric context correctly."""
+    store = get_store()
+    investigation = store.create_investigation("Explain bar test")
+    chart = Artifact(
+        artifact_type=ArtifactType.CHART,
+        title="Sales by City",
+        content={
+            "chart_type": "bar",
+            "metric": "Sales",
+            "dimension": "City",
+            "x": "City",
+            "y": "sum",
+            "rows": [
+                {"City": "New York", "sum": 253608.90},
+                {"City": "Los Angeles", "sum": 175851.34},
+            ],
+        },
+        metadata={"dataset_id": "ds_1", "metric": "Sales", "dimension": "City", "branch_id": "grouped::Sales::City::sum::"},
+    )
+    store.add_artifact(investigation.investigation_id, chart)
+
+    client = TestClient(app)
+    response = client.post(
+        f"/investigations/{investigation.investigation_id}/artifacts/{chart.artifact_id}/explain"
+    )
+
+    assert response.status_code == 200
+    ctx = response.json()
+    assert ctx["chart_type"] == "bar"
+    assert ctx["metric"] == "Sales"
+    assert ctx["dimension"] == "City"
+    assert ctx["rows"] == 2
+    assert ctx["branch_id"] == "grouped::Sales::City::sum::"

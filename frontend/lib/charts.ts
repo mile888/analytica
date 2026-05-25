@@ -107,25 +107,31 @@ export function normalizeChartArtifact(artifact: Artifact): ChartPreviewData | n
   }
 
   if (type === "scatter") {
+    const xMetric = stringValue(content.x_metric) || stringValue(artifact.metadata?.x_metric) || xKey;
+    const yMetric = stringValue(content.y_metric) || stringValue(artifact.metadata?.y_metric) || yKey;
+    const labelKey = stringValue(content.label) || stringValue(content.label_field) || stringValue(content.grouping) || "label";
+    const scatterRows = Array.isArray(content.points) ? content.points.filter(isRecord) : rows;
     const points: ChartPoint[] = [];
-    rows.forEach((row, index) => {
-      const x = numberValue(row[xKey]);
-      const y = numberValue(row[yKey]);
-      if (x !== null && y !== null) {
-        points.push({ label: stringValue(row.label) || `Point ${index + 1}`, value: y, x, y });
-      }
+    scatterRows.forEach((row, index) => {
+      const x = numberValue(row.x) ?? numberValue(row[xKey]) ?? numberValue(row[xMetric]);
+      const y = numberValue(row.y) ?? numberValue(row[yKey]) ?? numberValue(row[yMetric]);
+      if (x === null || y === null) return;
+      const label = stringValue(row.label) || stringValue(row[labelKey]) || stringValue(row.group) || `Point ${index + 1}`;
+      points.push({ label, value: y, x, y });
     });
-    return points.length ? { type, title, xLabel: xKey, yLabel: yKey, points: points.slice(0, 80) } : null;
+    return points.length ? { type, title, xLabel: xMetric, yLabel: yMetric, points: points.slice(0, 80) } : null;
   }
 
   if (type === "heatmap") {
+    const heatRows = rows.length ? rows :
+      (Array.isArray(content.points) ? (content.points as unknown[]).filter(isRecord) : []);
     const valueKey = stringValue(content.value) || yKey || "value";
-    const points = rows
+    const points = heatRows
       .map((row) => ({
-        label: `${stringValue(row[yKey]) || stringValue(row.year)}-${stringValue(row[xKey]) || stringValue(row.month)}`,
+        label: `${stringValue(row[yKey]) || stringValue(row.year) || stringValue(row.row)}-${stringValue(row[xKey]) || stringValue(row.month) || stringValue(row.column)}`,
         value: numberValue(row[valueKey]) ?? numberValue(row.mean) ?? numberValue(row.value) ?? 0,
-        row: stringValue(row[yKey]) || stringValue(row.year),
-        column: stringValue(row[xKey]) || stringValue(row.month),
+        row: stringValue(row[yKey]) || stringValue(row.year) || stringValue(row.row),
+        column: stringValue(row[xKey]) || stringValue(row.month) || stringValue(row.column),
       }))
       .filter((point) => point.row && point.column);
     return points.length ? { type, title, xLabel: xKey, yLabel: yKey, points: points.slice(0, 120) } : null;

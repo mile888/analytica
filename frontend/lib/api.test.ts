@@ -29,6 +29,7 @@ import {
   requestReportSectionChanges,
   runInvestigation,
   selectArtifactForReport,
+  explainArtifact,
   updateInvestigationMemory,
   deleteReportComment,
   deleteDataSource,
@@ -469,6 +470,103 @@ describe("api client", () => {
     })).toBe(false);
   });
 
+  it("accepts cross-dataset findings as high-confidence key findings", () => {
+    const crossDatasetFinding = {
+      finding_id: "finding_cross",
+      title: "Joinability assessment",
+      text: "The loaded dataset contains 3 numeric fields and 2 categorical fields. Joinability assessment requires a second dataset to compare shared keys and entity overlap.",
+      status: "proposed" as const,
+      confidence: 0.85,
+      metadata: { confidence_level: "High", analysis_type: "cross_dataset" }
+    };
+    expect(isHighConfidenceKeyFinding(crossDatasetFinding)).toBe(true);
+
+    const warehouseFinding = {
+      finding_id: "finding_warehouse",
+      title: "Warehouse design",
+      text: "Candidate fact measures: Revenue, Cost. A star schema requires at least one additional table to establish entity relationships.",
+      status: "proposed" as const,
+      confidence: 0.85,
+      metadata: { confidence_level: "High", analysis_type: "cross_dataset" }
+    };
+    expect(isHighConfidenceKeyFinding(warehouseFinding)).toBe(true);
+
+    const schemaFinding = {
+      finding_id: "finding_schema",
+      title: "Schema profile",
+      text: "Schema profile: 4 numeric fields, 3 categorical fields, 1 temporal fields across 1,000 rows. Semantic comparison requires loading a second dataset.",
+      status: "proposed" as const,
+      confidence: 0.85,
+      metadata: { confidence_level: "High", analysis_type: "cross_dataset" }
+    };
+    expect(isHighConfidenceKeyFinding(schemaFinding)).toBe(true);
+  });
+
+  it("accepts structural findings with integration/identifier/attribution markers", () => {
+    const identifierFinding = {
+      finding_id: "finding_id1",
+      title: "Missing identifier",
+      text: "Customer-level attribution is blocked because no stable shared identifier exists across datasets.",
+      status: "proposed" as const,
+      confidence: 0.85,
+      metadata: { confidence_level: "High", analysis_type: "cross_dataset" }
+    };
+    expect(isHighConfidenceKeyFinding(identifierFinding)).toBe(true);
+
+    const integrationFinding = {
+      finding_id: "finding_id2",
+      title: "Integration risk",
+      text: "The datasets are not reliably joinable at row level, which limits integration options.",
+      status: "proposed" as const,
+      confidence: 0.85,
+      metadata: { confidence_level: "High", analysis_type: "cross_dataset" }
+    };
+    expect(isHighConfidenceKeyFinding(integrationFinding)).toBe(true);
+
+    const reportingFinding = {
+      finding_id: "finding_id3",
+      title: "Reporting opportunity",
+      text: "The datasets support executive reporting through geographic overlap.",
+      status: "proposed" as const,
+      confidence: 0.85,
+      metadata: { confidence_level: "High", analysis_type: "cross_dataset" }
+    };
+    expect(isHighConfidenceKeyFinding(reportingFinding)).toBe(true);
+  });
+
+  it("filters out findings containing grounding leakage", () => {
+    const groundingFinding = {
+      finding_id: "g1",
+      title: "Leaked",
+      text: "Sales are concentrated in the top segment. Grounding: Sales by City shows the pattern.",
+      confidence: 0.9,
+      metadata: { confidence_level: "High", analysis_type: "cross_dataset" }
+    };
+    expect(isHighConfidenceKeyFinding(groundingFinding)).toBe(false);
+  });
+
+  it("filters out findings hallucinating the main metric", () => {
+    const mainMetricFinding = {
+      finding_id: "m1",
+      title: "Hallucinated",
+      text: "the main metric has a clear leader — validate it before anchoring decisions.",
+      confidence: 0.9,
+      metadata: { confidence_level: "High", analysis_type: "executive_summary" }
+    };
+    expect(isHighConfidenceKeyFinding(mainMetricFinding)).toBe(false);
+  });
+
+  it("filters out findings hallucinating primary metric", () => {
+    const primaryFinding = {
+      finding_id: "p1",
+      title: "Hallucinated",
+      text: "Investigate the primary metric concentration first because it has the highest decision leverage.",
+      confidence: 0.9,
+      metadata: { confidence_level: "High", analysis_type: "executive_summary" }
+    };
+    expect(isHighConfidenceKeyFinding(primaryFinding)).toBe(false);
+  });
+
   it("formats dataframe and SQL payloads without exposing raw previews", () => {
     expect(formatFindingForUser({
       finding_id: "finding_2",
@@ -664,6 +762,12 @@ describe("api client", () => {
     );
   });
 
+  it("builds same-origin proxy URLs when the browser API base is relative", () => {
+    const url = buildApiUrl("/data-sources", { limit: 10 }, "/api");
+
+    expect(url).toBe("/api/data-sources?limit=10");
+  });
+
   it("throws ApiError with status and body on non-2xx", async () => {
     vi.stubGlobal(
       "fetch",
@@ -704,7 +808,7 @@ describe("api client", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8000/data-sources",
+      "http://backend:8000/data-sources",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
@@ -741,7 +845,7 @@ describe("api client", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8000/investigations",
+      "http://backend:8000/investigations",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
@@ -788,7 +892,7 @@ describe("api client", () => {
 
     const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
     const [, init] = calls[0];
-    expect(calls[0][0]).toBe("http://localhost:8000/data-sources/upload-csv");
+    expect(calls[0][0]).toBe("http://backend:8000/data-sources/upload-csv");
     expect(init).toMatchObject({ method: "POST", cache: "no-store" });
     expect(init.headers).toBeUndefined();
     expect(init.body).toBeInstanceOf(FormData);
@@ -808,7 +912,7 @@ describe("api client", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:8000/investigations/inv_1/messages",
+      "http://backend:8000/investigations/inv_1/messages",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
@@ -821,7 +925,7 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:8000/investigations/inv_1/run",
+      "http://backend:8000/investigations/inv_1/run",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
@@ -846,12 +950,12 @@ describe("api client", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:8000/investigations/inv_1/branches",
+      "http://backend:8000/investigations/inv_1/branches",
       expect.objectContaining({ cache: "no-store" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:8000/investigations/inv_1/branches/Sales%20by%20City/activate",
+      "http://backend:8000/investigations/inv_1/branches/Sales%20by%20City/activate",
       expect.objectContaining({ method: "POST" })
     );
   });
@@ -873,12 +977,12 @@ describe("api client", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:8000/investigations/inv_1/reports",
+      "http://backend:8000/investigations/inv_1/reports",
       expect.objectContaining({ cache: "no-store" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:8000/investigations/inv_1/reports",
+      "http://backend:8000/investigations/inv_1/reports",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
@@ -889,7 +993,7 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      "http://localhost:8000/investigations/inv_1/artifacts/artifact_1/report-selection",
+      "http://backend:8000/investigations/inv_1/artifacts/artifact_1/report-selection",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ selected: true })
@@ -897,7 +1001,7 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       4,
-      "http://localhost:8000/reports/share_1/finalize",
+      "http://backend:8000/reports/share_1/finalize",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ created_by: "user", force: true })
@@ -922,7 +1026,7 @@ describe("api client", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:8000/reports/share_1/sections/section_1",
+      "http://backend:8000/reports/share_1/sections/section_1",
       expect.objectContaining({
         method: "PATCH",
         body: JSON.stringify({ title: "Edited", content: "Body" })
@@ -930,7 +1034,7 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:8000/reports/share_1/sections",
+      "http://backend:8000/reports/share_1/sections",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ title: "New", content: "Content" })
@@ -938,17 +1042,17 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      "http://localhost:8000/reports/share_1/sections/section_1",
+      "http://backend:8000/reports/share_1/sections/section_1",
       expect.objectContaining({ method: "DELETE" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       4,
-      "http://localhost:8000/reports/share_1/sections/section_2/duplicate",
+      "http://backend:8000/reports/share_1/sections/section_2/duplicate",
       expect.objectContaining({ method: "POST" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       5,
-      "http://localhost:8000/reports/share_1/sections/reorder",
+      "http://backend:8000/reports/share_1/sections/reorder",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ section_ids: ["section_2", "section_1"] })
@@ -956,12 +1060,12 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       6,
-      "http://localhost:8000/reports/share_1/sections/section_2/approve",
+      "http://backend:8000/reports/share_1/sections/section_2/approve",
       expect.objectContaining({ method: "POST" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       7,
-      "http://localhost:8000/reports/share_1/sections/section_2/request-changes",
+      "http://backend:8000/reports/share_1/sections/section_2/request-changes",
       expect.objectContaining({ method: "POST" })
     );
   });
@@ -980,12 +1084,12 @@ describe("api client", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:8000/reports/share_1/comments",
+      "http://backend:8000/reports/share_1/comments",
       expect.objectContaining({ cache: "no-store" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:8000/reports/share_1/comments",
+      "http://backend:8000/reports/share_1/comments",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ section_id: "section_1", text: "Clarify this", author: "reviewer" })
@@ -993,12 +1097,12 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      "http://localhost:8000/reports/share_1/comments/comment_1/resolve",
+      "http://backend:8000/reports/share_1/comments/comment_1/resolve",
       expect.objectContaining({ method: "POST" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       4,
-      "http://localhost:8000/reports/share_1/comments/comment_1",
+      "http://backend:8000/reports/share_1/comments/comment_1",
       expect.objectContaining({ method: "DELETE" })
     );
   });
@@ -1015,12 +1119,12 @@ describe("api client", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:8000/investigations/inv_1",
+      "http://backend:8000/investigations/inv_1",
       expect.objectContaining({ method: "DELETE" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:8000/data-sources/ds_1?delete_file=true",
+      "http://backend:8000/data-sources/ds_1?delete_file=true",
       expect.objectContaining({ method: "DELETE" })
     );
   });
@@ -1040,12 +1144,12 @@ describe("api client", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:8000/investigations/inv_1/memory",
+      "http://backend:8000/investigations/inv_1/memory",
       expect.objectContaining({ cache: "no-store" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:8000/investigations/inv_1/memory",
+      "http://backend:8000/investigations/inv_1/memory",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ type: "risk", content: "Data may be stale", title: "", status: "active" })
@@ -1053,7 +1157,7 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      "http://localhost:8000/investigations/inv_1/memory/mem_1",
+      "http://backend:8000/investigations/inv_1/memory/mem_1",
       expect.objectContaining({
         method: "PATCH",
         body: JSON.stringify({ status: "resolved" })
@@ -1061,12 +1165,12 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       4,
-      "http://localhost:8000/investigations/inv_1/suggested-questions?limit=6",
+      "http://backend:8000/investigations/inv_1/suggested-questions?limit=6",
       expect.objectContaining({ cache: "no-store" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       5,
-      "http://localhost:8000/investigations/inv_1/workflow-guidance",
+      "http://backend:8000/investigations/inv_1/workflow-guidance",
       expect.objectContaining({ cache: "no-store" })
     );
   });
@@ -1090,7 +1194,7 @@ describe("api client", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:8000/investigations/inv_1/findings/finding_1/promote-memory",
+      "http://backend:8000/investigations/inv_1/findings/finding_1/promote-memory",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ type: "risk" })
@@ -1098,7 +1202,7 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:8000/investigations/inv_1/findings/finding_1/evidence",
+      "http://backend:8000/investigations/inv_1/findings/finding_1/evidence",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
@@ -1111,7 +1215,7 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      "http://localhost:8000/reports/share_1/comments/comment_1/promote-memory",
+      "http://backend:8000/reports/share_1/comments/comment_1/promote-memory",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ investigation_id: "inv_1" })
@@ -1119,7 +1223,7 @@ describe("api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       4,
-      "http://localhost:8000/reports/share_1/sections/section_1/promote-memory",
+      "http://backend:8000/reports/share_1/sections/section_1/promote-memory",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ investigation_id: "inv_1" })
@@ -1203,5 +1307,121 @@ describe("api client", () => {
     expect(summary.blockingChecks).toBe(1);
     expect(summary.overallStatus).toBe("Changes requested");
     expect(summary.firstOpenCommentSectionId).toBe("section_2");
+  });
+
+  it("calls artifact explain endpoint without requiring branch", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        request_type: "EXPLAIN_ARTIFACT",
+        artifact_id: "chart_1",
+        title: "Sales distribution in LA",
+        chart_type: "histogram",
+        metric: "Sales",
+        dimension: "",
+        dataset_id: "ds_1",
+        dataset_ids: [],
+        filters: [{column: "City", operator: "equals", value: "Los Angeles"}],
+        row_count: 728,
+        branch_id: "",
+        run_id: "",
+        bins: 10,
+        summary: {total_records: 728, peak_bin_count: 245}
+      })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const ctx = await explainArtifact("inv_1", "chart_1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://backend:8000/investigations/inv_1/artifacts/chart_1/explain",
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(ctx.request_type).toBe("EXPLAIN_ARTIFACT");
+    expect(ctx.artifact_id).toBe("chart_1");
+    expect(ctx.chart_type).toBe("histogram");
+    expect(ctx.metric).toBe("Sales");
+  });
+
+  it("returns clear error for missing artifact instead of branch not found", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      text: async () => JSON.stringify({detail: "Artifact not found or no longer available: chart_gone"})
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(explainArtifact("inv_1", "chart_gone")).rejects.toMatchObject({
+      status: 404
+    });
+
+    // Verify the error does NOT say "Branch not found"
+    try {
+      await explainArtifact("inv_1", "chart_gone");
+    } catch (err) {
+      expect(String(err)).toContain("Artifact not found");
+      expect(String(err)).not.toContain("Branch not found");
+    }
+  });
+
+  it("sends artifact metadata in message when explaining a chart", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ message_id: "msg_explain_1", investigation_id: "inv_1", role: "user", message_type: "follow_up", content: "Explain this chart.", created_at: "2026-01-01T00:00:00Z", metadata: {} })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createInvestigationMessage("inv_1", {
+      role: "user",
+      type: "follow_up",
+      content: "Explain this chart.",
+      metadata: {
+        action: "explain_artifact",
+        artifact_id: "chart_1",
+        chart_type: "histogram",
+        chart_title: "Sales distribution in LA",
+        metric: "Sales"
+      }
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.metadata.action).toBe("explain_artifact");
+    expect(body.metadata.artifact_id).toBe("chart_1");
+    expect(body.metadata.chart_type).toBe("histogram");
+  });
+
+  it("branch activation does not block when branch is stale", async () => {
+    let callIndex = 0;
+    const fetchMock = vi.fn(async () => {
+      callIndex++;
+      // First call: branch activation fails with 404
+      if (callIndex === 1) {
+        return {
+          ok: false,
+          status: 404,
+          text: async () => JSON.stringify({detail: "Branch not found"})
+        };
+      }
+      // Subsequent calls succeed
+      return {
+        ok: true,
+        json: async () => ({ branches: [], active_branch_id: "" })
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Branch activation should throw ApiError
+    await expect(activateInvestigationBranch("inv_1", "stale::branch::id")).rejects.toMatchObject({
+      status: 404
+    });
+
+    // But message creation should still work (separate call)
+    callIndex = 1; // Reset to skip the 404
+    const result = await createInvestigationMessage("inv_1", {
+      content: "Explain this chart.",
+      type: "follow_up",
+      metadata: { action: "explain_artifact", artifact_id: "chart_1" }
+    });
+    expect(result).toBeDefined();
   });
 });

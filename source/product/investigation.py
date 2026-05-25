@@ -347,6 +347,10 @@ class ReportSection:
     title: str
     content: str = ""
     order: int = 0
+    section_type: str = "narrative"
+    source_branch_id: str | None = None
+    source_artifact_ids: list[str] = field(default_factory=list)
+    source_question_ids: list[str] = field(default_factory=list)
     artifact_ids: list[str] = field(default_factory=list)
     edited_by_user: bool = False
     created_by: str = "ai"
@@ -377,6 +381,11 @@ class ShareableReport:
     approved_at: datetime | None = None
     approved_by: str | None = None
     sections: list[ReportSection] = field(default_factory=list)
+    dataset_ids: list[str] = field(default_factory=list)
+    branch_ids: list[str] = field(default_factory=list)
+    included_question_ids: list[str] = field(default_factory=list)
+    summary: str = ""
+    limitations: list[str] = field(default_factory=list)
     source_finding_ids: list[str] = field(default_factory=list)
     source_artifact_ids: list[str] = field(default_factory=list)
     include_technical: bool = False

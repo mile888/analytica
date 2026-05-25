@@ -1,4 +1,5 @@
 # Project specific
+.vscode/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -142,7 +143,6 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
-!.env_example
 .venv
 env/
 venv/
@@ -216,3 +216,9 @@ pnpm-debug.log*
 *.tmp
 *.bak
 *.swp
+
+# Cleanup baselines
+.cleanup_baseline_*.txt
+.cleanup_*_baseline.txt
+.cleanup_docker_build_baseline.txt
+.final_cleanup_*_baseline.txt

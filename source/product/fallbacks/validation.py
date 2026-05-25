@@ -26,12 +26,17 @@ def _is_findings_evidence_question(question: str) -> bool:
 
 def _is_overview_question(question: str) -> bool:
     normalized = _normalize(question)
+    # If the question asks for strategic/analytical summary, it's NOT a dataset overview
+    strategic_markers = ("strategy", "strategic", "insight", "executive", "business", "стратег")
+    if any(marker in normalized for marker in strategic_markers):
+        return False
     markers = (
         "what can you say",
         "summarize dataset",
         "summarize this dataset",
         "describe dataset",
         "describe data",
+        "summarize the data",
         "summarize",
         "schema",
         "overview",
@@ -77,6 +82,12 @@ def _is_chart_question(question: str) -> bool:
 def _is_outlier_question(question: str) -> bool:
     normalized = _normalize(question)
     markers = ("outlier", "outliers", "anomal", "unusual", "extreme", "аномал", "выброс", "необыч")
+    return any(marker in normalized for marker in markers)
+
+
+def _is_duration_question(question: str) -> bool:
+    normalized = _normalize(question)
+    markers = ("duration", "length", "runtime", "run time", "длительн", "продолж", "хронометраж")
     return any(marker in normalized for marker in markers)
 
 
@@ -284,16 +295,6 @@ def _is_hypothesis_followup_question(normalized_question: str) -> bool:
             "опроверг",
         )
     )
-
-
-def _is_large_order_concentration_hypothesis(question: str) -> bool:
-    normalized = _normalize(question)
-    return any(marker in normalized for marker in ("large order", "large orders", "few large", "outlier", "extreme", "крупн", "выброс"))
-
-
-def _is_volume_hypothesis(question: str) -> bool:
-    normalized = _normalize(question)
-    return any(marker in normalized for marker in ("volume", "count", "record", "records", "order volume", "колич", "объем", "объём"))
 
 
 def _metric_is_explicit_enough(question: str, metric_col: str | None) -> bool:

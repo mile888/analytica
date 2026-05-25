@@ -193,12 +193,6 @@ def build_conversation_state(
     )
 
 
-def overview_fallback_allowed(question: str, *, intent: ResolvedIntent, state: InvestigationConversationState) -> bool:
-    if intent.primary == ConversationIntent.OVERVIEW and not state.recent_findings and not state.active_chart:
-        return True
-    return False
-
-
 def is_semantically_redundant_response(
     candidate_response: str,
     recent_assistant_messages: list[str],

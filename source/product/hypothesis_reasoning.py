@@ -407,23 +407,6 @@ def _validate_from_transformation(frame: HypothesisFrame, transformed: Any) -> t
     )
 
 
-def _hypothesis_shift_text(rows: list[dict[str, Any]], dimension: str) -> str:
-    parts = []
-    for row in rows:
-        parts.append(
-            f"`{row.get(dimension)}` rank #{int(_number(row.get('original_rank')))} -> #{int(_number(row.get('adjusted_rank')))} "
-            f"(mean {_number(row.get('original_mean')):.2f} -> {_number(row.get('adjusted_mean')):.2f}, n={int(_number(row.get('adjusted_count') or row.get('original_count')))})"
-        )
-    return ", ".join(parts)
-
-
-def _number(value: Any) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return 0.0
-
-
 def _validate_outlier_concentration(
     frame: HypothesisFrame,
     df: pd.DataFrame,

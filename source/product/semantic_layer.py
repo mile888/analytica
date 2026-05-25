@@ -46,6 +46,9 @@ class SemanticDatasetProfile:
     row_count: int = 0
     column_count: int = 0
     columns: list[SemanticColumnProfile] = field(default_factory=list)
+    domain: str = "general"
+    domain_confidence: float = 0.0
+    domain_vocabulary: list[str] = field(default_factory=list)
 
     @property
     def by_name(self) -> dict[str, SemanticColumnProfile]:
@@ -300,7 +303,15 @@ def build_semantic_dataset_profile(
                     business_hints=_business_hints(column.name, role),
                 )
             )
-    return SemanticDatasetProfile(row_count=row_count, column_count=len(columns), columns=columns)
+    domain, domain_confidence, domain_vocabulary = _infer_dataset_domain(columns)
+    return SemanticDatasetProfile(
+        row_count=row_count,
+        column_count=len(columns),
+        columns=columns,
+        domain=domain,
+        domain_confidence=domain_confidence,
+        domain_vocabulary=domain_vocabulary,
+    )
 
 
 def build_investigation_focus(
@@ -643,7 +654,11 @@ def _metric_semantic_groups() -> dict[str, tuple[str, ...]]:
             "revenue", "sales", "sale", "salary", "price", "cost", "profit", "income", "pay", "compensation",
             "spend", "выруч", "продаж", "продажи", "доход", "зарплат", "цена", "прибыл",
         ),
-        "volume": ("count", "quantity", "volume", "duration", "openings", "applicants", "users", "records", "колич", "число"),
+        "volume": (
+            "count", "quantity", "volume", "duration", "openings", "applicants", "users", "records",
+            "entries", "items",
+            "колич", "число",
+        ),
         "quality": ("rating", "score", "rank", "оцен", "рейтинг", "балл"),
     }
 
@@ -656,16 +671,22 @@ def _dimension_semantic_groups() -> dict[str, tuple[str, ...]]:
         ),
         "category": (
             "category", "categories", "segment", "segments", "type", "types", "class", "group", "groups",
-            "категор", "сегмент", "сегменты", "сегментам", "тип", "типы", "групп",
+            "genre", "genres",
+            "категор", "сегмент", "сегменты", "сегментам", "тип", "типы", "групп", "жанр",
         ),
         "organization": (
             "company", "vendor", "customer", "client", "product", "industry", "department", "team",
+            "studio", "director", "provider", "publisher", "brand",
             "компан", "клиент", "продукт", "индустр", "отрасл",
         ),
         "place": (
             "region", "city", "country", "location", "market", "area", "state",
             "город", "города", "городам", "городах", "городов", "городе",
             "регион", "регионам", "регионах", "страна", "странам", "локац",
+        ),
+        "content_type": (
+            "type", "types", "kind", "format", "media",
+            "тип", "вид", "формат",
         ),
     }
 
@@ -905,3 +926,73 @@ def _dedupe_text(items: list[str]) -> list[str]:
 
 def _normalize(value: str) -> str:
     return str(value or "").replace("`", "").replace("-", " ").replace("_", " ").lower()
+
+
+_DOMAIN_EVIDENCE: dict[str, tuple[str, ...]] = {
+    "retail": (
+        "sales", "revenue", "profit", "discount", "order", "product", "customer",
+        "shipping", "ship", "quantity", "category", "sub category", "segment",
+        "invoice", "cart", "sku", "store", "retail",
+    ),
+    "entertainment": (
+        "title", "genre", "director", "cast", "rating", "release", "duration",
+        "listed", "show", "movie", "film", "season", "episode", "content",
+        "studio", "actor", "streaming", "imdb", "description",
+    ),
+    "healthcare": (
+        "patient", "diagnosis", "treatment", "clinical", "hospital", "symptom",
+        "disease", "medical", "health", "prescription", "blood", "bmi",
+        "heart", "therapy", "admission",
+    ),
+    "financial": (
+        "income", "salary", "compensation", "balance", "credit", "loan",
+        "deposit", "investment", "portfolio", "interest", "mortgage",
+        "wage", "earnings", "tax", "payment",
+    ),
+    "geographic": (
+        "population", "area", "density", "capital", "continent", "gdp",
+        "latitude", "longitude", "elevation", "census",
+    ),
+    "operational": (
+        "ticket", "queue", "process", "status", "priority", "sla",
+        "incident", "resolution", "request", "workflow", "escalation",
+    ),
+    "hr": (
+        "employee", "hire", "department", "job title", "position",
+        "performance", "attrition", "tenure", "leave", "headcount",
+    ),
+    "survey": (
+        "survey", "satisfaction", "response", "feedback", "score",
+        "questionnaire", "opinion", "nps",
+    ),
+}
+
+
+def _infer_dataset_domain(columns: list[SemanticColumnProfile]) -> tuple[str, float, list[str]]:
+    """Infer the dataset domain from column names and semantic tags."""
+    if not columns:
+        return "general", 0.0, []
+    all_names = " ".join(_normalize(col.name) for col in columns)
+    all_tags = " ".join(tag for col in columns for tag in col.semantic_tags)
+    combined = all_names + " " + all_tags
+
+    scores: dict[str, float] = {}
+    matched_terms: dict[str, list[str]] = {}
+    for domain, markers in _DOMAIN_EVIDENCE.items():
+        hits = [marker for marker in markers if marker in combined]
+        scores[domain] = len(hits)
+        matched_terms[domain] = hits
+
+    if not any(scores.values()):
+        return "general", 0.0, []
+
+    best_domain = max(scores, key=lambda d: scores[d])
+    best_score = scores[best_domain]
+    total_columns = max(len(columns), 1)
+    confidence = min(1.0, best_score / max(total_columns * 0.3, 3.0))
+
+    second_best = sorted(scores.values(), reverse=True)[1] if len(scores) > 1 else 0
+    if best_score <= 1 or (second_best and best_score - second_best <= 1 and best_score < 4):
+        return "general", confidence * 0.5, matched_terms.get(best_domain, [])
+
+    return best_domain, round(confidence, 2), matched_terms.get(best_domain, [])

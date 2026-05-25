@@ -92,6 +92,7 @@ export default async function InvestigationDetailPage({ params }: { params: Prom
             artifacts={(investigation.artifacts || []).filter((artifact) => artifact.visibility !== "hidden")}
             suggestions={suggestedQuestions.suggestions}
             branches={branches}
+            dataSources={dataContextItems.map((item) => item.source)}
           />
         </main>
 

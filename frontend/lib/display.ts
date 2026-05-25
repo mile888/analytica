@@ -123,8 +123,21 @@ export function isHighConfidenceKeyFinding(finding: Finding): boolean {
     metadataText(metadata, "confidence") ||
     confidenceLabel(finding.confidence)
   ).toLowerCase();
-  if (confidence !== "high") return false;
   const analysisType = metadataText(metadata, "analysis_type").toLowerCase();
+  // Real computed analysis types should accept Medium confidence findings
+  const computedAnalysisTypes = new Set([
+    "grouped_metric", "count_based", "outlier", "correlation", "trend",
+    "data_quality", "cross_dataset", "joinability", "warehouse",
+    "semantic_overlap", "schema_comparison", "volume_relationship",
+    "semantic_role_prevalence", "semantic_role_association",
+    "rank_groups", "diversity_mix", "temporal_shift",
+    "category_exploration", "strategic_synthesis",
+    "multi_factor_association", "category_growth",
+    "diversity_analysis", "category_mix_shift",
+    "prevalence", "association", "duration_analysis",
+  ]);
+  const isComputed = computedAnalysisTypes.has(analysisType);
+  if (confidence !== "high" && !(confidence === "medium" && isComputed)) return false;
   const text = `${cleanText(finding.title)} ${cleanText(finding.text)} ${metadataText(metadata, "conclusion")}`.toLowerCase();
   const forbiddenTypes = new Set([
     "clarification_needed",
@@ -153,7 +166,16 @@ export function isHighConfidenceKeyFinding(finding: Finding): boolean {
     "limitation no ",
     "could not complete",
     "could not compute",
-    "no written analytical answer"
+    "no written analytical answer",
+    "grounding:",
+    "the main metric",
+    "primary metric",
+    "highest decision leverage",
+    "secondary observation",
+    "the selected metric",
+    "previously established conclusions",
+    "already been established",
+    "the key conclusions remain unchanged"
   ];
   if (forbiddenMarkers.some((marker) => text.includes(marker))) return false;
   const substantiveMarkers = [
@@ -176,7 +198,64 @@ export function isHighConfidenceKeyFinding(finding: Finding): boolean {
     " varies ",
     " outlier",
     " missing ",
-    " duplicates"
+    " duplicates",
+    " joinab",
+    " compatibility ",
+    " shared ",
+    " overlap ",
+    " bridge ",
+    " warehouse ",
+    " fact ",
+    " dimension",
+    " entity ",
+    " mapping ",
+    " relationship ",
+    " schema ",
+    " candidate ",
+    " complementary",
+    " concentrated",
+    " instability ",
+    " star schema",
+    " segmentation ",
+    " numeric fields",
+    " categorical fields",
+    " identifier",
+    " attribution",
+    " integration",
+    " granularity",
+    " joinable",
+    " executive",
+    " reporting ",
+    " not reliably",
+    " blocked",
+    " cannot be ",
+    " reliably ",
+    " prevalence",
+    " association",
+    " associated",
+    " risk factor",
+    " grouped by ",
+    " churn",
+    " attrition",
+    " common ",
+    " rate ",
+    " gap ",
+    " most common",
+    " record count",
+    " records)",
+    " factor ",
+    " factors ",
+    " indicator ",
+    " growth",
+    " growing",
+    " declining",
+    " diversity",
+    " concentration",
+    " emerging",
+    " strongest ",
+    " ranked ",
+    " binary ",
+    " strategic ",
   ];
   return substantiveMarkers.some((marker) => text.includes(marker));
 }
@@ -478,7 +557,12 @@ function analysisTypeLabel(value: string): string {
     correlation: "Correlation",
     trend: "Trend",
     data_quality: "Data quality",
-    overview: "Overview"
+    overview: "Overview",
+    cross_dataset: "Cross-dataset analysis",
+    joinability: "Joinability analysis",
+    warehouse: "Warehouse design",
+    semantic_overlap: "Semantic overlap",
+    schema_comparison: "Schema comparison"
   };
   return labels[value] || titleCase(value.replaceAll("_", " "));
 }

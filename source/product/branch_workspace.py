@@ -6,22 +6,29 @@ from enum import Enum
 from typing import Any
 
 from source.product.execution_planner import AuthoritativeQueryPlan
+from source.product.question_routing import branch_type_for_intent, title_for_intent
 
 
 class BranchRouteAction(str, Enum):
     CREATE = "create"
     SWITCH = "switch"
     CONTINUE = "continue"
+    GLOBAL = "global"
+    NONE = "none"
 
 
 @dataclass(frozen=True)
 class BranchIdentity:
+    dataset_scope: str | None = None
+    dataset_id: str | None = None
+    dataset_ids: tuple[str, ...] = ()
     metric: str | None = None
     dimension: str | None = None
     time_axis: str | None = None
     chart_type: str | None = None
     aggregation: str | None = None
     transformation: str | None = None
+    active_artifact_id: str | None = None
     filters: tuple[tuple[str, str, str], ...] = ()
     intent: str = "general"
 
@@ -30,13 +37,15 @@ class BranchIdentity:
         filters = "|".join(f"{col}{op}{value}" for col, op, value in self.filters)
         aggregation = _canonical_aggregation(self)
         chart_family = _canonical_chart_family(self)
+        dataset_key = ",".join(self.dataset_ids) or (self.dataset_id or "")
+        prefix = (branch_type, dataset_key) if dataset_key else (branch_type,)
         if branch_type == "temporal":
-            return "::".join(str(item or "") for item in (branch_type, self.metric, self.time_axis, aggregation, self.transformation, filters))
+            return "::".join(str(item or "") for item in (*prefix, self.metric, self.time_axis, aggregation, self.transformation, filters))
         if branch_type == "distribution":
-            return "::".join(str(item or "") for item in (branch_type, self.metric, chart_family, self.transformation, filters))
+            return "::".join(str(item or "") for item in (*prefix, self.metric, chart_family, self.transformation, filters))
         if branch_type == "grouped":
-            return "::".join(str(item or "") for item in (branch_type, self.metric, self.dimension, aggregation, self.transformation, filters))
-        return "::".join(str(item or "") for item in (branch_type, self.metric, self.dimension, self.time_axis, chart_family, aggregation, self.transformation, filters))
+            return "::".join(str(item or "") for item in (*prefix, self.metric, self.dimension, aggregation, self.transformation, filters))
+        return "::".join(str(item or "") for item in (*prefix, self.intent, self.metric, self.dimension, self.time_axis, chart_family, aggregation, self.transformation, filters))
 
 
 @dataclass
@@ -44,9 +53,15 @@ class AnalyticalBranch:
     branch_id: str
     identity: BranchIdentity
     title: str
+    branch_type: str = ""
+    intent_type: str = ""
+    parent_branch_id: str | None = None
+    created_from_query: str = ""
+    last_user_query: str = ""
     last_query_plan: dict[str, Any] = field(default_factory=dict)
     findings: list[str] = field(default_factory=list)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    active_artifact_id: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -122,12 +137,16 @@ class BranchWorkspaceManager:
                 continue
             ident = raw.get("identity") if isinstance(raw.get("identity"), dict) else {}
             identity = BranchIdentity(
+                dataset_scope=ident.get("dataset_scope"),
+                dataset_id=ident.get("dataset_id"),
+                dataset_ids=tuple(str(item) for item in ident.get("dataset_ids", []) if str(item).strip()),
                 metric=ident.get("metric"),
                 dimension=ident.get("dimension"),
                 time_axis=ident.get("time_axis"),
                 chart_type=ident.get("chart_type"),
                 aggregation=ident.get("aggregation"),
                 transformation=ident.get("transformation"),
+                active_artifact_id=ident.get("active_artifact_id"),
                 filters=tuple(tuple(item) for item in ident.get("filters", [])),
                 intent=str(ident.get("intent") or "general"),
             )
@@ -144,9 +163,15 @@ class BranchWorkspaceManager:
                 branch_id=canonical_key,
                 identity=identity,
                 title=_title_for_identity(identity),
+                branch_type=str(raw.get("branch_type") or _branch_type(identity)),
+                intent_type=str(raw.get("intent_type") or identity.intent),
+                parent_branch_id=raw.get("parent_branch_id"),
+                created_from_query=str(raw.get("created_from_query") or ""),
+                last_user_query=str(raw.get("last_user_query") or ""),
                 last_query_plan=raw.get("last_query_plan") if isinstance(raw.get("last_query_plan"), dict) else {},
                 findings=[str(item) for item in raw.get("findings", []) if str(item).strip()] if isinstance(raw.get("findings"), list) else [],
                 artifacts=[item for item in raw.get("artifacts", []) if isinstance(item, dict)] if isinstance(raw.get("artifacts"), list) else [],
+                active_artifact_id=str(raw.get("active_artifact_id") or identity.active_artifact_id or ""),
             )
         active = active_canonical or active_input
         if active not in branches:
@@ -176,7 +201,12 @@ def branch_dtos_for_investigation(investigation: Any) -> list[dict[str, Any]]:
             {
                 "branch_id": branch_id,
                 "title": title,
-                "branch_type": _branch_type(branch.identity),
+                "branch_type": branch.branch_type or _branch_type(branch.identity),
+                "intent_type": branch.intent_type or branch.identity.intent,
+                "dataset_scope": branch.identity.dataset_scope,
+                "dataset_id": branch.identity.dataset_id,
+                "dataset_ids": list(branch.identity.dataset_ids),
+                "active_artifact_id": branch.active_artifact_id or branch.identity.active_artifact_id,
                 "metric": branch.identity.metric,
                 "dimension": branch.identity.dimension,
                 "filters": [
@@ -209,6 +239,9 @@ def activate_branch(investigation: Any, branch_id: str) -> dict[str, Any]:
     state["active_chart_type"] = branch.identity.chart_type
     state["active_branch_type"] = _branch_type(branch.identity)
     state["active_branch_id"] = branch_id
+    state["active_dataset_scope"] = branch.identity.dataset_scope
+    state["active_dataset_id"] = branch.identity.dataset_id
+    state["active_dataset_ids"] = list(branch.identity.dataset_ids)
     active_artifact = _latest_artifact_for_branch(investigation, branch_id)
     if active_artifact:
         state.update(active_artifact)
@@ -245,6 +278,9 @@ def _latest_artifact_for_branch(investigation: Any, branch_id: str) -> dict[str,
         filters = metadata.get("filters") or nested.get("filters") or content.get("filters") or []
         payload = {
             "active_artifact_id": artifact_id,
+            "active_dataset_id": metadata.get("dataset_id") or nested.get("dataset_id") or "",
+            "active_dataset_ids": metadata.get("dataset_ids") or nested.get("dataset_ids") or [],
+            "active_dataset_scope": metadata.get("dataset_scope") or nested.get("dataset_scope") or "",
             "active_metric": metric,
             "active_dimension": dimension,
             "active_aggregation": aggregation,
@@ -277,29 +313,74 @@ def upsert_branch_from_plan(
     finding_count: int = 0,
 ) -> BranchWorkspace:
     plan = _plan_like(plan_payload)
-    identity = _identity_from_plan(plan)
+    identity = _identity_from_plan(plan, plan_payload)
     branch_id = identity.key()
     branch = workspace.branches.get(branch_id) or AnalyticalBranch(
         branch_id=branch_id,
         identity=identity,
         title=_title_for_identity(identity),
+        branch_type=_branch_type(identity),
+        intent_type=identity.intent,
     )
     branch.last_query_plan = dict(plan_payload)
     branch.artifacts = [{}] * max(0, artifact_count)
     branch.findings = [""] * max(0, finding_count)
+    branch.active_artifact_id = str(plan_payload.get("active_artifact_id") or branch.active_artifact_id or "")
+    branch.created_from_query = branch.created_from_query or str(plan_payload.get("raw_question") or "")
+    branch.last_user_query = str(plan_payload.get("raw_question") or branch.last_user_query)
     workspace.branches[branch_id] = branch
     workspace.active_branch_id = branch_id
     return workspace
 
 
-def _identity_from_plan(plan: AuthoritativeQueryPlan) -> BranchIdentity:
+def upsert_branch_for_intent(
+    workspace: BranchWorkspace,
+    *,
+    intent_type: str,
+    dataset_scope: str = "",
+    dataset_id: str = "",
+    dataset_ids: list[str] | tuple[str, ...] | None = None,
+    created_from_query: str = "",
+    parent_branch_id: str | None = None,
+) -> BranchWorkspace:
+    identity = BranchIdentity(
+        dataset_scope=dataset_scope or None,
+        dataset_id=dataset_id or None,
+        dataset_ids=tuple(str(item) for item in (dataset_ids or []) if str(item).strip()),
+        intent=str(intent_type or "analysis"),
+    )
+    branch_id = identity.key()
+    branch = workspace.branches.get(branch_id) or AnalyticalBranch(
+        branch_id=branch_id,
+        identity=identity,
+        title=title_for_intent(intent_type),
+        branch_type=branch_type_for_intent(intent_type),
+        intent_type=str(intent_type),
+        parent_branch_id=parent_branch_id,
+        created_from_query=created_from_query,
+    )
+    branch.title = title_for_intent(intent_type)
+    branch.branch_type = branch_type_for_intent(intent_type)
+    branch.intent_type = str(intent_type)
+    branch.last_user_query = created_from_query
+    workspace.branches[branch_id] = branch
+    workspace.active_branch_id = branch_id
+    return workspace
+
+
+def _identity_from_plan(plan: AuthoritativeQueryPlan, plan_payload: dict[str, Any] | None = None) -> BranchIdentity:
+    payload = plan_payload or {}
     return BranchIdentity(
+        dataset_scope=payload.get("dataset_scope"),
+        dataset_id=payload.get("dataset_id"),
+        dataset_ids=tuple(str(item) for item in payload.get("dataset_ids", []) if str(item).strip()) if isinstance(payload.get("dataset_ids"), list) else (),
         metric=plan.metric,
         dimension=plan.dimension,
         time_axis=plan.time_axis,
         chart_type=plan.chart_type,
         aggregation=plan.aggregation,
         transformation=plan.transformation,
+        active_artifact_id=payload.get("active_artifact_id"),
         filters=tuple((item.column, item.operator, str(item.value)) for item in plan.filters),
         intent=_canonical_intent(plan),
     )
@@ -341,6 +422,9 @@ def _plan_like(payload: dict[str, Any]) -> AuthoritativeQueryPlan:
 
 
 def _branch_type(identity: BranchIdentity) -> str:
+    routed = branch_type_for_intent(identity.intent)
+    if routed != "analysis":
+        return routed
     if identity.intent in {"temporal", "distribution", "grouped", "quality", "hypothesis", "shipping", "transformation"}:
         return identity.intent
     if identity.intent in {"shipping_delay"}:
@@ -387,6 +471,9 @@ def _canonical_chart_family(identity: BranchIdentity) -> str:
 
 
 def _title_for_identity(identity: BranchIdentity) -> str:
+    routed = title_for_intent(identity.intent)
+    if routed != "Analysis" and routed != str(identity.intent or "").replace("_", " ").title():
+        return routed
     if identity.intent == "shipping_delay":
         return "Shipping Delay Investigation"
     if identity.intent == "binning":
@@ -404,13 +491,6 @@ def _title_for_identity(identity: BranchIdentity) -> str:
     if identity.metric and identity.chart_type:
         return f"{identity.metric} {identity.chart_type}"
     return identity.intent.replace("_", " ").title()
-
-
-def _filter_value(identity: BranchIdentity, column: str) -> str | None:
-    for col, _op, value in identity.filters:
-        if col == column:
-            return value
-    return None
 
 
 def _first_filter_value(identity: BranchIdentity) -> str | None:

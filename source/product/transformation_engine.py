@@ -589,15 +589,6 @@ def _format_rows_ru(rows: pd.DataFrame, dimension_col: str) -> str:
     )
 
 
-def _format_change_rows(rows: pd.DataFrame, dimension_col: str) -> str:
-    if rows.empty:
-        return "no material changes"
-    return ", ".join(
-        f"`{row[dimension_col]}` ({float(row['original_mean']):.2f} -> {float(row['adjusted_mean']):.2f})"
-        for _, row in rows.iterrows()
-    )
-
-
 def _format_rank_shift_rows(rows: pd.DataFrame, dimension_col: str) -> str:
     if rows.empty:
         return "no material shifts"
@@ -636,10 +627,6 @@ def _format_impact_shift_rows(rows: list[dict[str, Any]], dimension_col: str) ->
 
 def _normalize(value: str) -> str:
     return " ".join(str(value or "").replace("_", " ").replace("-", " ").lower().split())
-
-
-def _contains_cyrillic(value: str) -> bool:
-    return any("а" <= char.lower() <= "я" or char.lower() == "ё" for char in str(value or ""))
 
 
 def _records(frame: pd.DataFrame) -> list[dict[str, Any]]:

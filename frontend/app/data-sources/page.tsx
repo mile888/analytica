@@ -29,7 +29,7 @@ export default async function DataSourcesPage() {
           ) : (
             sources.map((source) => (
               <Card key={source.data_source_id} className="transition hover:border-slate-300 hover:shadow">
-                <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="flex flex-wrap items-center justify-between gap-4">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <h2 className="font-semibold text-slate-950 dark:text-slate-50">{source.name}</h2>
@@ -44,9 +44,9 @@ export default async function DataSourcesPage() {
                       <p className="mt-2 max-w-3xl text-sm text-slate-600 dark:text-slate-300">{source.description}</p>
                     ) : null}
                   </div>
-                  <div className="flex flex-wrap items-center justify-end gap-2">
+                  <div className="flex shrink-0 items-center gap-2">
                     <Link href={`/data-sources/${source.data_source_id}`}>
-                      <Button variant="secondary" size="sm">Open dataset</Button>
+                      <Button variant="secondary" size="sm">Open</Button>
                     </Link>
                     <DeleteDataSourceAction dataSourceId={source.data_source_id} />
                   </div>

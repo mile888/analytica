@@ -87,7 +87,7 @@ export function InvestigationKnowledgeSidebar({
             ) : null}
           </div>
         ) : (
-          <EmptyState>No high-confidence findings yet. Run an analysis that produces a supported result.</EmptyState>
+          <EmptyState>No findings yet. Ask about metrics, relationships, joinability, or semantic overlap.</EmptyState>
         )}
       </CollapsibleSection>
 
@@ -161,7 +161,7 @@ function ArtifactGroups({
       {meaningfulTables.length ? (
         <div className="space-y-2">
           {meaningfulTables.slice(0, 2).map((artifact) => (
-            <TableArtifactCard key={artifact.artifact_id} artifact={artifact} compact />
+            <TableArtifactCard key={artifact.artifact_id} artifact={artifact} investigationId={investigationId} compact />
           ))}
         </div>
       ) : null}

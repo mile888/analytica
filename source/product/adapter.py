@@ -27,9 +27,9 @@ def agent_output_to_investigation_update(output: dict[str, Any] | None) -> Inves
     summary = _first_text(data.get("summary"), structured.get("summary"), data.get("final_answer"))
     raw_key_findings = _text_list(structured.get("key_findings") or data.get("key_findings"))
     suppress_key_findings = _suppresses_key_findings(data, structured)
-    key_findings = [] if suppress_key_findings else [
-        item for item in raw_key_findings if not _is_profile_observation(item)
-    ]
+    key_findings = [] if suppress_key_findings else _deduplicate_finding_texts([
+        item for item in raw_key_findings if not _is_profile_observation(item) and not _contains_grounding_leakage(item)
+    ])
     limitations = _text_list(structured.get("limitations") or data.get("limitations"))
     next_steps = _text_list(structured.get("next_steps") or data.get("next_steps"))
     generated_code = _first_text(data.get("generated_code"), structured.get("generated_code"), data.get("code"))
@@ -41,6 +41,7 @@ def agent_output_to_investigation_update(output: dict[str, Any] | None) -> Inves
 
     update = InvestigationUpdate()
     execution_context_unavailable = bool(trace_metadata.get("execution_context_unavailable"))
+    no_execution = bool(trace_metadata.get("no_execution"))
 
     if summary or key_findings or limitations or next_steps:
         content = _report_content(summary, key_findings, limitations, next_steps)
@@ -55,7 +56,7 @@ def agent_output_to_investigation_update(output: dict[str, Any] | None) -> Inves
             content=content,
             metadata={"source": "agent_output", "trace_metadata": trace_metadata},
         )
-        if not execution_context_unavailable:
+        if not execution_context_unavailable and not no_execution:
             update.artifacts.append(
                 Artifact(
                     artifact_type=ArtifactType.REPORT,
@@ -67,7 +68,7 @@ def agent_output_to_investigation_update(output: dict[str, Any] | None) -> Inves
                 )
             )
 
-    if summary and not execution_context_unavailable:
+    if summary and not execution_context_unavailable and not no_execution:
         update.artifacts.append(
             Artifact(
                 artifact_type=ArtifactType.TEXT,
@@ -357,3 +358,53 @@ def _visibility_from_value(value: Any, artifact_type: ArtifactType) -> ArtifactV
         return ArtifactVisibility(str(value))
     except (TypeError, ValueError):
         return _visibility_for_type(artifact_type)
+
+
+def _contains_grounding_leakage(text: str) -> bool:
+    normalized = " ".join(str(text or "").lower().split())
+    leakage_markers = (
+        "grounding:",
+        "highest decision leverage",
+        "secondary observation",
+        "the selected metric",
+        "previously established conclusions",
+        "already been established",
+        "building on",
+        "the key conclusions remain unchanged",
+    )
+    return any(marker in normalized for marker in leakage_markers)
+
+
+def _finding_dedup_signature(text: str) -> str:
+    import re
+    stop = {"the", "a", "an", "is", "are", "was", "were", "and", "or", "to", "of",
+            "in", "by", "for", "with", "not", "no", "it", "that", "this", "these",
+            "can", "be", "has", "have", "but", "yet", "from", "on", "at"}
+    cleaned = re.sub(r"[^\w\s]", "", " ".join(str(text or "").lower().split()))
+    tokens = cleaned.split()
+    return " ".join(t for t in tokens if t not in stop)
+
+
+def _deduplicate_finding_texts(findings: list[str], *, threshold: float = 0.7) -> list[str]:
+    """Remove near-duplicate findings within a single run output."""
+    if len(findings) <= 1:
+        return findings
+    accepted: list[str] = []
+    accepted_sigs: list[set[str]] = []
+    for finding in findings:
+        sig_tokens = set(_finding_dedup_signature(finding).split())
+        if not sig_tokens:
+            continue
+        is_dup = False
+        for prior_tokens in accepted_sigs:
+            if not prior_tokens:
+                continue
+            intersection = len(sig_tokens & prior_tokens)
+            union = len(sig_tokens | prior_tokens)
+            if intersection / max(union, 1) >= threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            accepted.append(finding)
+            accepted_sigs.append(sig_tokens)
+    return accepted
