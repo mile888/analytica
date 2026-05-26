@@ -22,7 +22,7 @@ The benchmark evaluates the deterministic product fallback path. Live LLM execut
 
 ## Benchmark Scope
 
-The notebook benchmark contains **17 benchmark cases**.
+The notebook benchmark contains **19 benchmark cases**.
 
 The cases cover:
 
@@ -45,18 +45,18 @@ The following values come from `docs/evaluation_outputs/summary_metrics.csv`.
 
 | Metric | Result |
 |--------|--------|
-| End-to-End Success Rate | 100.0% (17/17) |
-| Analytical Correctness | 88.2% (15/17) |
-| Semantic Intent Accuracy | 94.1% (16/17) |
-| Metric Selection Accuracy | 100.0% (17/17) |
-| Aggregation Accuracy | 100.0% (17/17) |
+| End-to-End Success Rate | 100.0% (19/19) |
+| Analytical Correctness | 84.2% (16/19) |
+| Semantic Intent Accuracy | 89.5% (17/19) |
+| Metric Selection Accuracy | 100.0% (19/19) |
+| Aggregation Accuracy | 100.0% (19/19) |
 | KPI Correctness | 100.0% (7/7) |
-| Groundedness | 100.0% (17/17) |
+| Groundedness | 100.0% (19/19) |
 | Visualization Correctness | 100.0% (11/11) |
-| Follow-Up Consistency | 0.0% (0/1) |
+| Follow-Up Consistency | 33.3% (1/3) |
 | Multi-Dataset Completeness | 100.0% (3/3) |
-| Retry Fraction | 0.0% (0/17) |
-| Average Latency | 0.035s mean, 0.018s median, 0.297s max |
+| Retry Fraction | 0.0% (0/19) |
+| Average Latency | 0.043s mean, 0.019s median, 0.381s max |
 
 ## Backend Test Result
 
@@ -84,7 +84,7 @@ The following values come from `docs/evaluation_outputs/category_breakdown.csv`.
 |----------|------:|-----------------------:|
 | Basic grouped aggregation | 2 | 100.0% |
 | Business KPI analysis | 3 | 100.0% |
-| Follow-up correction | 1 | 0.0% |
+| Follow-up correction | 3 | 33.3% |
 | Health risk analysis | 2 | 50.0% |
 | Multi-dataset comparison | 3 | 100.0% |
 | Negative incompatible request | 1 | 100.0% |
@@ -95,7 +95,7 @@ The following values come from `docs/evaluation_outputs/category_breakdown.csv`.
 
 ## Failure Analysis
 
-The benchmark has two analytically incorrect cases.
+The benchmark has three analytically incorrect cases.
 
 ### 1. `health_smoker_prevalence`
 
@@ -155,6 +155,43 @@ intent, follow-up
 
 This is a real follow-up correction failure. The explicit correction was not applied correctly.
 
+### 3. `followup_filter_total_sales_above_5000`
+
+Question:
+
+```text
+Now show only cities with total Sales above 5000.
+```
+
+Expected behavior:
+
+- preserve `City` as the grouping field;
+- preserve `Sales` as the metric;
+- use total sales;
+- return only cities where total sales are above 5000.
+
+Observed behavior:
+
+- the system preserved `City`;
+- the system preserved `Sales`;
+- the system used total sales;
+- the system still returned `Berlin`, whose total sales are below the threshold.
+
+Failure type:
+
+```text
+intent, numeric evidence, follow-up
+```
+
+This is a real follow-up refinement failure. The system handled the main aggregation but did not apply the threshold correctly.
+
+### Passed follow-up case
+
+The expanded benchmark also includes `followup_top3_profit_categories`.
+This case passed. It asked the system to narrow a previous profit-by-category analysis to the top three categories with the metric stated explicitly in the follow-up prompt.
+
+The follow-up result is therefore partial. The system passed one simpler top-N refinement, but it failed the aggregation overwrite case and the threshold-filter refinement case.
+
 ## Multi-Dataset Evaluation Caveat
 
 The multi-dataset benchmark cases preselect dataset IDs before execution. Therefore, these cases test branch execution, branch evidence packages, and comparative output completeness. They do not fully test dataset resolver accuracy.
@@ -178,9 +215,9 @@ Latency values were measured in the local deterministic fallback path.
 The audited values are:
 
 ```text
-mean: 0.035s
-median: 0.018s
-max: 0.297s
+mean: 0.043s
+median: 0.019s
+max: 0.381s
 ```
 
 These numbers do not include live LLM provider latency.
@@ -189,11 +226,11 @@ These numbers do not include live LLM provider latency.
 
 Known limitations:
 
-1. The benchmark has only 17 cases.
+1. The benchmark has only 19 cases.
 2. Live LLM behavior is not evaluated in this benchmark.
 3. Multi-dataset benchmark cases preselect dataset IDs.
 4. Groundedness checks are partly lexical.
-5. Follow-up correction has a failing benchmark case.
+5. Follow-up behavior is partial: one simpler top-N follow-up passed, while two follow-up cases failed.
 6. Healthcare semantic matching still has known failures.
 7. Frontend tests were not run in the audited environment because `npm` was not available.
 8. UI screenshots were not generated in the audited environment.
