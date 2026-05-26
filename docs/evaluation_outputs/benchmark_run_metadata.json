@@ -1,0 +1,94 @@
+{
+  "generated_at_utc": "2026-05-25T21:55:37.829972+00:00",
+  "notebook": "notebooks/evaluation_metrics.ipynb",
+  "audit_runner": "executed notebook code cells with display/style/fig.show disabled only",
+  "cases": 17,
+  "results_rows": 17,
+  "skipped_noncritical_cells": [
+    {
+      "cell": 21,
+      "reason": "name 'failure_distribution' is not defined",
+      "noncritical": true
+    }
+  ],
+  "python": "3.12.12",
+  "metrics": [
+    {
+      "metric": "End-to-End Success Rate",
+      "display_value": "100.0%",
+      "count": "17/17"
+    },
+    {
+      "metric": "Analytical Correctness",
+      "display_value": "88.2%",
+      "count": "15/17"
+    },
+    {
+      "metric": "Semantic Intent Accuracy",
+      "display_value": "94.1%",
+      "count": "16/17"
+    },
+    {
+      "metric": "Metric Selection Accuracy",
+      "display_value": "100.0%",
+      "count": "17/17"
+    },
+    {
+      "metric": "Aggregation Accuracy",
+      "display_value": "100.0%",
+      "count": "17/17"
+    },
+    {
+      "metric": "KPI Correctness",
+      "display_value": "100.0%",
+      "count": "7/7"
+    },
+    {
+      "metric": "Groundedness",
+      "display_value": "100.0%",
+      "count": "17/17"
+    },
+    {
+      "metric": "Visualization Correctness",
+      "display_value": "100.0%",
+      "count": "11/11"
+    },
+    {
+      "metric": "Follow-Up Consistency",
+      "display_value": "0.0%",
+      "count": "0/1"
+    },
+    {
+      "metric": "Multi-Dataset Completeness",
+      "display_value": "100.0%",
+      "count": "3/3"
+    },
+    {
+      "metric": "Retry Fraction",
+      "display_value": "0.0%",
+      "count": "0/17"
+    },
+    {
+      "metric": "Average Latency",
+      "display_value": "0.035s",
+      "count": "median 0.018s; max 0.297s"
+    }
+  ],
+  "failures": [
+    {
+      "case_id": "health_smoker_prevalence",
+      "category": "health risk analysis",
+      "failure_reason": "grouping, numeric evidence"
+    },
+    {
+      "case_id": "followup_average_to_total_sales",
+      "category": "follow-up correction",
+      "failure_reason": "intent, follow-up"
+    }
+  ],
+  "important_caveats": [
+    "Live LLM runner disabled; benchmark evaluates deterministic product fallback path.",
+    "Multi-dataset cases inject selected dataset IDs and evaluate branch output/completeness rather than resolver accuracy.",
+    "Display styling disabled because jinja2 is absent from current project environment."
+  ]
+}

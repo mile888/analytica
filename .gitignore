@@ -222,3 +222,13 @@ pnpm-debug.log*
 .cleanup_*_baseline.txt
 .cleanup_docker_build_baseline.txt
 .final_cleanup_*_baseline.txt
+
+main.aux
+main.fdb_latexmk
+main.fls
+main.log
+main.out
+main.toc
+main.pdf
+main.tex
+
