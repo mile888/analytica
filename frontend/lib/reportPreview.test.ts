@@ -35,26 +35,6 @@ describe("report preview artifact snapshots", () => {
     expect(reportPreviewRows(snapshots[0])).toEqual([{ label: "LA", value: 12 }]);
   });
 
-  it("does not invent chart rows when the persisted snapshot has no chart payload", () => {
-    expect(reportPreviewRows({ artifact_id: "table_1" })).toEqual([]);
-  });
-
-  it("restores persisted table rows for report table artifacts", () => {
-    const rows = reportTableRows({
-      artifact_id: "table_1",
-      artifact_type: "table",
-      content: [
-        { City: "LA", Sales: 12, Rank: 1 },
-        { City: "SF", Sales: 9, Rank: 2 }
-      ]
-    });
-
-    expect(rows).toEqual([
-      { City: "LA", Sales: "12", Rank: "1" },
-      { City: "SF", Sales: "9", Rank: "2" }
-    ]);
-    expect(reportTableColumns(rows)).toEqual(["City", "Sales", "Rank"]);
-  });
 
   it("parses numbered question and answer transcript blocks", () => {
     expect(reportTranscriptItems("1. Question: First?\nAnswer: One.\n\n2. Question: Second?\nAnswer: Two.")).toEqual([

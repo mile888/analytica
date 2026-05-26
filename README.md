@@ -1,26 +1,14 @@
-# Automated Data Analytics LLM Agent for Streamlining Business Operations
+# Analytica
 
 ## Overview
 
-Analytica is a deterministic analytical assistant designed for structured data exploration and KPI-oriented reasoning.
+Analytica is an analytical workspace for exploring structured data, running KPI-focused analysis, and turning validated results into reusable artifacts and reports.
 
-The project combines semantic planning, deterministic execution, validation mechanisms, artifact generation, and multi-dataset workflows into a single analytical workspace. Instead of relying entirely on free-form language-model generation, the system focuses on reproducible analytical execution and transparent intermediate outputs.
+The system is built around a practical split: natural-language questions are used to understand analytical intent, while deterministic services perform the actual computations. This keeps results reproducible, inspectable, and easier to validate.
 
-The prototype was developed as an engineering-oriented research project focused on practical analytical workflows, benchmark reproducibility, and controlled execution behavior.
+## How It Works
 
----
-
-## Main Idea
-
-Analytica is built around a simple idea: language models should help interpret analytical intent, while deterministic services should compute the final numerical results.
-
-The system first analyzes the user request and identifies the expected metric, aggregation type, grouping logic, filters, visualization intent, and dataset scope. After that, deterministic analytical modules execute the actual computations using dataframe operations and validated SQL workflows.
-
-The workflow also includes validation and grounding checks that help detect common analytical problems such as missing fields, unsupported assumptions, incorrect dataset selection, or inconsistent outputs. Generated tables, charts, findings, and reports are stored as reusable analytical artifacts inside the investigation workspace.
-
-LLM-based planning is configurable and can be enabled through optional semantic-planning or DeepAgents execution paths. However, the current benchmark evaluates only deterministic product execution workflows.
-
----
+Analytica parses a question into an analytical intent: metric, aggregation, grouping, filters, chart request, and dataset scope. The backend then executes the analysis through dataframe and read-only SQL workflows, validates the result, and stores the output as part of an investigation.
 
 ## Main Workflow
 
@@ -32,47 +20,41 @@ LLM-based planning is configurable and can be enabled through optional semantic-
 6. Results are stored as reusable analytical artifacts.
 7. Final reports can be generated from validated outputs.
 
----
-
 ## Key Capabilities
 
 ### Dataset Handling
 
-The current public workflow focuses on CSV-based dataset upload and profiling. Uploaded datasets are stored in a local runtime environment together with schema information, metadata summaries, categorical statistics, and numerical profiling results.
+CSV datasets can be uploaded, profiled, and reused across investigations. Profiles include schema information, metadata summaries, categorical statistics, and numerical summaries.
 
 ### Investigation Workspace
 
-Analytica uses an investigation-oriented workflow where users can ask analytical questions, inspect intermediate outputs, continue follow-up exploration, and organize findings into lightweight reports.
+Investigations keep questions, runs, artifacts, findings, and reports together. Users can inspect intermediate outputs, continue follow-up analysis, and organize useful results into report sections.
 
 ### Deterministic Analytical Execution
 
-The analytical backend supports grouped aggregations, distributions, trend analysis, relationship-style analysis, outlier inspection, and chart-oriented analytical workflows using deterministic dataframe execution.
+The backend supports grouped aggregations, distributions, trend analysis, relationship-style analysis, outlier inspection, and chart-oriented workflows.
 
 ### KPI and Business Reasoning
 
-The system includes a business-semantic planning layer for KPI-oriented analysis tasks. The current implementation focuses mainly on retail-style analytical scenarios such as profit margin analysis, discount sensitivity, shipping-cost burden, and operational inefficiency patterns.
+Business-oriented workflows cover profit margin analysis, discount sensitivity, shipping-cost burden, operational inefficiency, and similar KPI scenarios.
 
 ### Multi-Dataset Workflows
 
 Analytica supports branch-based comparative reasoning across several datasets. Independent execution branches collect scoped evidence packages which are later combined into comparative summaries.
 
-The current implementation focuses on comparative analytical workflows rather than arbitrary relational BI-style joins.
+The multi-dataset layer is designed for scoped comparison and synthesis, not arbitrary warehouse-style joins.
 
 ### Artifacts and Reporting
 
-Analytical outputs are stored as reusable artifacts, including tables, charts, findings, and structured report sections. The prototype also supports lightweight TXT and PDF export workflows.
+Analytical outputs are stored as reusable artifacts: tables, charts, findings, report sections, TXT exports, and PDF exports.
 
 ### Validation and Restricted Execution
 
-The workflow includes plan validation, grounding checks, read-only SQL validation, and restricted dynamic Python execution.
+The workflow includes plan validation, grounding checks, read-only SQL validation, and restricted Python execution. Runtime controls rely on AST validation, restricted built-ins, limited imports, and tool-level safeguards.
 
-The current execution model is application-level rather than OS-sandboxed. It relies on AST validation, restricted built-ins, limited imports, and tool-level restrictions.
+### Configurable Planning
 
-### Configurable LLM Integration
-
-LLM-assisted planning is configurable through external provider settings and local configuration files. Supported configurations include OpenRouter, Gemini, OpenAI-compatible APIs, and Ollama-style local models.
-
----
+Optional planning providers can be configured through local settings, while the core analytical execution remains deterministic.
 
 ## Architecture
 
@@ -141,40 +123,23 @@ The frontend does not compute analytical results directly. It sends requests to 
 
 CSV upload is the main public ingestion path. Uploaded files are stored under the configured upload directory, profiled, and converted into runtime data so that later analytical runs can use them.
 
----
+## Implementation
 
-## What Is Implemented
+The application includes a FastAPI backend and a Next.js frontend.
 
-The current prototype includes a FastAPI backend together with a Next.js investigation workspace for analytical exploration and report-oriented workflows.
+The backend handles investigation management, dataset upload, runtime execution, artifact storage, report generation, and SQLite-backed persistence. Uploaded CSV datasets are profiled and made available to deterministic analytical workflows.
 
-The backend supports investigation management, dataset upload, runtime execution, artifact storage, report generation, and lightweight persistence through SQLite-based product stores. Uploaded CSV datasets can be profiled and reused inside deterministic analytical workflows.
+The frontend includes investigation pages, dataset-management views, upload workflows, chart and table artifacts, follow-up interaction, and report workspace components.
 
-The frontend includes investigation pages, dataset-management views, upload workflows, chart and table artifacts, follow-up interaction, and report-oriented workspace components.
-
-The analytical backend currently supports:
+The analytical backend supports:
 - deterministic dataframe-style execution;
 - dataset scope resolution and dataset registry workflows;
 - business-semantic KPI logic for selected schemas;
 - read-only dataframe SQL tools;
 - restricted dynamic Python execution;
-- optional LLM-assisted and DeepAgents execution paths.
+- optional external planning and tool-execution paths.
 
-The repository also includes benchmark notebooks, evaluation outputs, and thesis visualization workflows used during the deterministic evaluation process.
-
----
-
-## Current Limitations
-
-The current public workflow focuses mainly on CSV-based analytical exploration. Database connectors, external APIs, and broader ingestion workflows are outside the current prototype scope.
-
-The evaluation benchmark is relatively small and focuses on deterministic execution paths rather than live LLM behavior. Multi-dataset workflows are comparative and branch-based, not a full relational warehouse or SQL federation system.
-
-Dynamic Python execution is restricted through application-level validation and limited execution controls, but the prototype is not designed as a hardened multi-tenant sandbox environment.
-
-Follow-up analytical correction remains partial. Simpler incremental refinements can work reliably, while more difficult semantic overwrite cases may still fail.
-
-The strongest analytical behavior currently appears in tested retail-style KPI workflows. More general healthcare and cross-domain semantic reasoning remains less stable.
----
+The repository also includes benchmark notebooks, evaluation outputs, and thesis visualization assets.
 
 ## Project Structure
 
@@ -190,11 +155,11 @@ source/product/sqlite/
   SQLite product store implementation.
 
 source/tools/
-  DeepAgents tools for dataframe inspection, SQL validation/querying,
+  Tools for dataframe inspection, SQL validation/querying,
   safe Python analysis, chart helpers, and report artifacts.
 
 source/agent.py
-  Optional DeepAgents runtime setup and tool selection.
+  Optional runtime setup and tool selection.
 
 frontend/
   Next.js application with investigation workspace, upload UI, artifacts,
@@ -209,14 +174,13 @@ docs/evaluation_outputs/
 docs/thesis_figures/
   Figures used by the thesis report.
 ```
----
 
 ## Setup
 
 ### Requirements
 
 - Python 3.12+
-- Node.js 22 is used in the frontend Docker configuration. Local Node.js 18+ may also work for development.
+- Node.js 22 for the Docker frontend build. Local Node.js 18+ may work for development.
 - Docker and Docker Compose for containerized setup.
 
 ### Environment
@@ -226,7 +190,6 @@ Create a local environment file:
 ```bash
 cp .env.example .env
 ```
----
 
 ## Running the Application
 
@@ -245,8 +208,6 @@ Default URLs:
 
 ### Local Backend
 
-The backend dependencies are listed in `requirements.txt` and `pyproject.toml`.
-
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -262,8 +223,6 @@ npm install
 npm run dev
 ```
 
-For local frontend-to-backend calls, check `frontend/.env.example` and `frontend/lib/api.ts`.
-
 ## Evaluation
 
 The project includes a deterministic benchmark for selected analytical workflows.
@@ -275,35 +234,20 @@ Evaluation notebooks:
 Generated outputs:
 - docs/evaluation_outputs/
 
-The benchmark evaluates analytical correctness, KPI handling, visualization generation, follow-up behavior, and multi-dataset workflows on selected deterministic execution paths.
+The benchmark covers analytical correctness, KPI handling, visualization generation, follow-up behavior, and multi-dataset workflows.
 
 ## Development Notes
 
 ### Backend Tests
 
-The audited backend command used for non-integration tests is:
+The compact backend smoke/regression suite contains 28 tests:
 
 ```bash
-uv run --with pypdf pytest -q -m "not integration"
+uv run --with pypdf pytest -q tests
 ```
 
 If dependencies are already installed in a virtual environment, the equivalent pytest command is:
 
 ```bash
-pytest -q -m "not integration"
+pytest -q tests
 ```
-
-### Frontend Tests and Build
-
-The frontend package defines these commands:
-
-```bash
-cd frontend
-npm test -- --run
-npm run build
-```
-
-
-
-
-

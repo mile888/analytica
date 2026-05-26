@@ -16,6 +16,10 @@ export const viewport: Viewport = {
   maximumScale: 5,
 };
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
+
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const recentInvestigations = await listInvestigations().catch(() => []);
 

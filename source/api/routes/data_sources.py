@@ -64,7 +64,9 @@ class DataSourceSemanticNotesPayload(BaseModel):
 
 @router.get("")
 def list_data_sources(status: str | None = None):
-    return [to_jsonable(item) for item in get_store().list_data_sources(status=status)]
+    store = get_store()
+    sources = store.list_data_sources(status=status)
+    return [to_jsonable(item) for item in sources]
 
 
 @router.post("")
@@ -110,7 +112,6 @@ async def upload_csv_data_source(
         metadata={"original_filename": filename, "upload_kind": "csv"},
     )
 
-    # --- Stage 1: Save file to disk ---
     try:
         location = save_uploaded_csv(contents, filename, source.data_source_id)
     except Exception as exc:
@@ -126,7 +127,6 @@ async def upload_csv_data_source(
     warnings: list[str] = []
     profile_status = "complete"
 
-    # --- Stage 2: Profile the CSV ---
     profile = None
     try:
         profile = profile_csv(location)
@@ -150,7 +150,6 @@ async def upload_csv_data_source(
         warnings.append(f"Profiling partially failed: {type(exc).__name__}: {exc}")
         profile_status = "partial"
 
-    # --- Stage 3: Save profile (if available) ---
     if profile is not None:
         try:
             store.save_data_source_profile(created.data_source_id, profile)
@@ -159,7 +158,6 @@ async def upload_csv_data_source(
             warnings.append(f"Profile could not be saved: {type(exc).__name__}")
             profile_status = "partial"
 
-    # --- Stage 4: Persist runtime (SQLite for execution) ---
     try:
         df = _read_uploaded_runtime_csv(location)
         if df.empty and len(df.columns) == 0:
@@ -193,7 +191,6 @@ async def upload_csv_data_source(
         except Exception:
             pass
 
-    # --- Stage 5: Build response ---
     try:
         data_source_payload = to_jsonable(store.get_data_source(created.data_source_id))
     except Exception as exc:

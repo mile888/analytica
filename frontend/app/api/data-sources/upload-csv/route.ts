@@ -21,7 +21,6 @@ function backendUrl(): string {
 }
 
 export async function POST(request: NextRequest) {
-  // --- Size guard ---
   const contentLength = request.headers.get("content-length");
   if (contentLength && parseInt(contentLength, 10) > MAX_UPLOAD_BYTES) {
     return NextResponse.json(
@@ -30,12 +29,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // --- Stream the request body to the backend ---
   const targetUrl = `${backendUrl()}/data-sources/upload-csv`;
 
   try {
-    // Forward the original request headers (content-type with boundary is critical
-    // for multipart form-data) and stream the body without buffering.
     const headers = new Headers();
     const contentType = request.headers.get("content-type");
     if (contentType) {
@@ -44,16 +40,21 @@ export async function POST(request: NextRequest) {
     if (contentLength) {
       headers.set("content-length", contentLength);
     }
+    const cookie = request.headers.get("cookie");
+    if (cookie) {
+      headers.set("cookie", cookie);
+    }
 
     const backendResponse = await fetch(targetUrl, {
       method: "POST",
       headers,
       body: request.body,
+      cache: "no-store",
+      next: { revalidate: 0 },
       // @ts-expect-error -- duplex is required for streaming request bodies in Node 18+
       duplex: "half",
     });
 
-    // --- Stream the backend response back to the client ---
     const responseHeaders = new Headers();
     backendResponse.headers.forEach((value, key) => {
       // Skip hop-by-hop headers

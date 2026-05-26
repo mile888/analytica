@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+from source.api.session import get_current_session_id
 from source.product.data_sources import (
     ColumnSemanticNote,
     DataSource,
@@ -84,8 +85,8 @@ class SQLiteInvestigationStore:
                 """
                 INSERT INTO investigations
                 (id, title, question, status, created_at, updated_at, data_sources_json,
-                 linked_data_source_ids_json, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 linked_data_source_ids_json, metadata_json, owner_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     investigation.investigation_id,
@@ -97,6 +98,7 @@ class SQLiteInvestigationStore:
                     _json(investigation.data_sources),
                     _json(investigation.linked_data_source_ids),
                     _json(investigation.metadata),
+                    self._owner_session_id(),
                 ),
             )
         return investigation
@@ -109,13 +111,15 @@ class SQLiteInvestigationStore:
         source_links = list(dict.fromkeys([*data_source.linked_investigation_ids, investigation_id]))
         data_source.linked_investigation_ids = source_links
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             conn.execute(
                 """
                 UPDATE investigations
                 SET linked_data_source_ids_json = ?, data_sources_json = ?, updated_at = ?
                 WHERE id = ?
+                """ + owner_sql + """
                 """,
-                (_json(linked_ids), _json(data_sources), _dt(utc_now()), investigation_id),
+                (_json(linked_ids), _json(data_sources), _dt(utc_now()), investigation_id, *owner_params),
             )
             self._upsert_data_source(conn, data_source)
         return self.get_investigation(investigation_id)
@@ -123,22 +127,31 @@ class SQLiteInvestigationStore:
     def update_investigation_metadata(self, investigation_id: str, metadata: dict) -> Investigation:
         self.get_investigation(investigation_id)
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             conn.execute(
-                "UPDATE investigations SET metadata_json = ?, updated_at = ? WHERE id = ?",
-                (_json(metadata or {}), _dt(utc_now()), investigation_id),
+                f"UPDATE investigations SET metadata_json = ?, updated_at = ? WHERE id = ?{owner_sql}",
+                (_json(metadata or {}), _dt(utc_now()), investigation_id, *owner_params),
             )
         return self.get_investigation(investigation_id)
 
     def get_investigation(self, investigation_id: str) -> Investigation:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM investigations WHERE id = ?", (investigation_id,)).fetchone()
+            owner_sql, owner_params = self._owner_and()
+            row = conn.execute(
+                f"SELECT * FROM investigations WHERE id = ?{owner_sql}",
+                (investigation_id, *owner_params),
+            ).fetchone()
             if row is None:
                 raise KeyError(f"Investigation not found: {investigation_id}")
             return self._hydrate_investigation(conn, row)
 
     def list_investigations(self) -> list[Investigation]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM investigations ORDER BY updated_at DESC").fetchall()
+            owner_sql, owner_params = self._owner_where()
+            rows = conn.execute(
+                f"SELECT * FROM investigations{owner_sql} ORDER BY updated_at DESC",
+                owner_params,
+            ).fetchall()
             return [self._hydrate_investigation(conn, row) for row in rows]
 
     def update_status(self, investigation_id: str, status: InvestigationStatus | str) -> Investigation:
@@ -149,7 +162,8 @@ class SQLiteInvestigationStore:
     def delete_investigation(self, investigation_id: str) -> None:
         self.get_investigation(investigation_id)
         with self._connect() as conn:
-            sources = conn.execute("SELECT * FROM data_sources").fetchall()
+            owner_sql, owner_params = self._owner_where()
+            sources = conn.execute(f"SELECT * FROM data_sources{owner_sql}", owner_params).fetchall()
             for row in sources:
                 source = self._data_source_from_row(row)
                 if investigation_id in source.linked_investigation_ids:
@@ -158,7 +172,8 @@ class SQLiteInvestigationStore:
                     ]
                     source.updated_at = utc_now()
                     self._upsert_data_source(conn, source)
-            conn.execute("DELETE FROM investigations WHERE id = ?", (investigation_id,))
+            owner_sql, owner_params = self._owner_and()
+            conn.execute("DELETE FROM investigations WHERE id = ?" + owner_sql, (investigation_id, *owner_params))
 
     def create_investigation_run(self, run: InvestigationRun) -> InvestigationRun:
         self.get_investigation(run.investigation_id)
@@ -177,22 +192,33 @@ class SQLiteInvestigationStore:
 
     def get_investigation_run(self, run_id: str) -> InvestigationRun:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM investigation_runs WHERE id = ?", (run_id,)).fetchone()
+            owner_sql, owner_params = self._owner_and()
+            row = conn.execute(
+                f"SELECT * FROM investigation_runs WHERE id = ?{owner_sql}",
+                (run_id, *owner_params),
+            ).fetchone()
             if row is None:
                 raise KeyError(f"InvestigationRun not found: {run_id}")
             return self._investigation_run_from_row(row)
 
     def list_investigation_runs(self) -> list[InvestigationRun]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM investigation_runs ORDER BY created_at DESC").fetchall()
+            owner_sql, owner_params = self._owner_where()
+            rows = conn.execute(
+                f"SELECT * FROM investigation_runs{owner_sql} ORDER BY created_at DESC",
+                owner_params,
+            ).fetchall()
             return [self._investigation_run_from_row(row) for row in rows]
 
     def list_runs_for_investigation(self, investigation_id: str) -> list[InvestigationRun]:
         self.get_investigation(investigation_id)
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             rows = conn.execute(
-                "SELECT * FROM investigation_runs WHERE investigation_id = ? ORDER BY created_at DESC",
-                (investigation_id,),
+                "SELECT * FROM investigation_runs WHERE investigation_id = ?"
+                + owner_sql
+                + " ORDER BY created_at DESC",
+                (investigation_id, *owner_params),
             ).fetchall()
             return [self._investigation_run_from_row(row) for row in rows]
 
@@ -203,8 +229,9 @@ class SQLiteInvestigationStore:
             conn.execute(
                 """
                 INSERT INTO investigation_run_events
-                (id, run_id, investigation_id, event_type, stage, message, created_at, metadata_json, severity)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, run_id, investigation_id, event_type, stage, message, created_at, metadata_json, severity,
+                 owner_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -216,6 +243,7 @@ class SQLiteInvestigationStore:
                     _dt(event.created_at),
                     _json(event.metadata),
                     event.severity.value,
+                    self._owner_session_id(),
                 ),
             )
         return event
@@ -223,9 +251,10 @@ class SQLiteInvestigationStore:
     def list_investigation_run_events(self, run_id: str) -> list[InvestigationRunEvent]:
         self.get_investigation_run(run_id)
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             rows = conn.execute(
-                "SELECT * FROM investigation_run_events WHERE run_id = ? ORDER BY created_at ASC",
-                (run_id,),
+                f"SELECT * FROM investigation_run_events WHERE run_id = ?{owner_sql} ORDER BY created_at ASC",
+                (run_id, *owner_params),
             ).fetchall()
             return [self._investigation_run_event_from_row(row) for row in rows]
 
@@ -236,13 +265,15 @@ class SQLiteInvestigationStore:
     ) -> list[InvestigationRunEvent]:
         self.get_investigation(investigation_id)
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             rows = conn.execute(
                 """
                 SELECT * FROM investigation_run_events
                 WHERE investigation_id = ?
+                """ + owner_sql + """
                 ORDER BY created_at ASC
                 """,
-                (investigation_id,),
+                (investigation_id, *owner_params),
             ).fetchall()
             return [self._investigation_run_event_from_row(row) for row in rows][-limit:]
 
@@ -256,8 +287,8 @@ class SQLiteInvestigationStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO investigation_messages
-                (id, investigation_id, run_id, role, type, content, created_at, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, investigation_id, run_id, role, type, content, created_at, metadata_json, owner_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
@@ -268,6 +299,7 @@ class SQLiteInvestigationStore:
                     message.content,
                     _dt(message.created_at),
                     _json(message.metadata),
+                    self._owner_session_id(),
                 ),
             )
             self._touch_investigation_conn(conn, message.investigation_id)
@@ -280,14 +312,19 @@ class SQLiteInvestigationStore:
     ) -> list[InvestigationMessage]:
         self.get_investigation(investigation_id)
         with self._connect() as conn:
-            sql = "SELECT * FROM investigation_messages WHERE investigation_id = ? ORDER BY created_at ASC"
-            rows = conn.execute(sql, (investigation_id,)).fetchall()
+            owner_sql, owner_params = self._owner_and()
+            sql = f"SELECT * FROM investigation_messages WHERE investigation_id = ?{owner_sql} ORDER BY created_at ASC"
+            rows = conn.execute(sql, (investigation_id, *owner_params)).fetchall()
             messages = [self._investigation_message_from_row(row) for row in rows]
             return messages[-limit:] if limit else messages
 
     def get_investigation_message(self, message_id: str) -> InvestigationMessage:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM investigation_messages WHERE id = ?", (message_id,)).fetchone()
+            owner_sql, owner_params = self._owner_and()
+            row = conn.execute(
+                f"SELECT * FROM investigation_messages WHERE id = ?{owner_sql}",
+                (message_id, *owner_params),
+            ).fetchone()
             if row is None:
                 raise KeyError(f"InvestigationMessage not found: {message_id}")
             return self._investigation_message_from_row(row)
@@ -309,30 +346,37 @@ class SQLiteInvestigationStore:
     ) -> list[InvestigationMemoryItem]:
         self.get_investigation(investigation_id)
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             if memory_type:
                 resolved = InvestigationMemoryType(memory_type)
                 rows = conn.execute(
                     """
                     SELECT * FROM investigation_memory
                     WHERE investigation_id = ? AND type = ?
+                    """ + owner_sql + """
                     ORDER BY updated_at DESC
                     """,
-                    (investigation_id, resolved.value),
+                    (investigation_id, resolved.value, *owner_params),
                 ).fetchall()
             else:
                 rows = conn.execute(
                     """
                     SELECT * FROM investigation_memory
                     WHERE investigation_id = ?
+                    """ + owner_sql + """
                     ORDER BY updated_at DESC
                     """,
-                    (investigation_id,),
+                    (investigation_id, *owner_params),
                 ).fetchall()
             return [self._investigation_memory_item_from_row(row) for row in rows]
 
     def get_investigation_memory_item(self, memory_id: str) -> InvestigationMemoryItem:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM investigation_memory WHERE id = ?", (memory_id,)).fetchone()
+            owner_sql, owner_params = self._owner_and()
+            row = conn.execute(
+                f"SELECT * FROM investigation_memory WHERE id = ?{owner_sql}",
+                (memory_id, *owner_params),
+            ).fetchone()
             if row is None:
                 raise KeyError(f"InvestigationMemoryItem not found: {memory_id}")
             return self._investigation_memory_item_from_row(row)
@@ -366,8 +410,9 @@ class SQLiteInvestigationStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO runs
-                (id, investigation_id, status, started_at, finished_at, error_message, raw_output_json, trace_json, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, investigation_id, status, started_at, finished_at, error_message, raw_output_json, trace_json,
+                 metadata_json, owner_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.run_id,
@@ -379,6 +424,7 @@ class SQLiteInvestigationStore:
                     _json(run.output),
                     _json(run.trace),
                     _json(run.metadata),
+                    self._owner_session_id(),
                 ),
             )
             self._touch_investigation_conn(conn, investigation_id)
@@ -389,8 +435,9 @@ class SQLiteInvestigationStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO artifacts
-                (id, investigation_id, run_id, type, title, content_json, visibility, created_at, pinned, path, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, investigation_id, run_id, type, title, content_json, visibility, created_at, pinned, path,
+                 metadata_json, owner_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     artifact.artifact_id,
@@ -404,6 +451,7 @@ class SQLiteInvestigationStore:
                     1 if artifact.pinned else 0,
                     artifact.path,
                     _json(artifact.metadata),
+                    self._owner_session_id(),
                 ),
             )
             self._touch_investigation_conn(conn, investigation_id)
@@ -415,8 +463,8 @@ class SQLiteInvestigationStore:
                 """
                 INSERT OR REPLACE INTO findings
                 (id, investigation_id, run_id, title, text, evidence_artifact_ids_json, evidence_json,
-                 confidence, status, created_at, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 confidence, status, created_at, metadata_json, owner_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     finding.finding_id,
@@ -430,6 +478,7 @@ class SQLiteInvestigationStore:
                     finding.status.value,
                     _dt(finding.created_at),
                     _json(finding.metadata),
+                    self._owner_session_id(),
                 ),
             )
             self._touch_investigation_conn(conn, investigation_id)
@@ -437,12 +486,14 @@ class SQLiteInvestigationStore:
 
     def update_finding(self, investigation_id: str, finding: Finding) -> Investigation:
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             cur = conn.execute(
                 """
                 UPDATE findings
                 SET title = ?, text = ?, evidence_artifact_ids_json = ?, evidence_json = ?,
                     confidence = ?, status = ?, metadata_json = ?
                 WHERE id = ? AND investigation_id = ?
+                """ + owner_sql + """
                 """,
                 (
                     finding.title,
@@ -454,6 +505,7 @@ class SQLiteInvestigationStore:
                     _json(finding.metadata),
                     finding.finding_id,
                     investigation_id,
+                    *owner_params,
                 ),
             )
             if cur.rowcount == 0:
@@ -481,13 +533,18 @@ class SQLiteInvestigationStore:
     def set_report(self, investigation_id: str, report: DecisionReport) -> Investigation:
         report.updated_at = utc_now()
         with self._connect() as conn:
-            conn.execute("DELETE FROM reports WHERE investigation_id = ?", (investigation_id,))
+            owner_sql, owner_params = self._owner_and()
+            conn.execute(
+                f"DELETE FROM reports WHERE investigation_id = ?{owner_sql}",
+                (investigation_id, *owner_params),
+            )
             conn.execute(
                 """
                 INSERT INTO reports
                 (id, investigation_id, run_id, question, answer, key_findings_json, evidence_json,
-                 limitations_json, next_steps_json, artifact_ids_json, content, created_at, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 limitations_json, next_steps_json, artifact_ids_json, content, created_at, metadata_json,
+                 owner_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     report.report_id,
@@ -503,6 +560,7 @@ class SQLiteInvestigationStore:
                     report.content,
                     _dt(report.created_at),
                     _json(report.metadata),
+                    self._owner_session_id(),
                 ),
             )
             self._touch_investigation_conn(conn, investigation_id)
@@ -510,9 +568,10 @@ class SQLiteInvestigationStore:
 
     def replace_data_sources(self, investigation_id: str, data_sources: list[str]) -> Investigation:
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             conn.execute(
-                "UPDATE investigations SET data_sources_json = ?, updated_at = ? WHERE id = ?",
-                (_json(data_sources), _dt(utc_now()), investigation_id),
+                f"UPDATE investigations SET data_sources_json = ?, updated_at = ? WHERE id = ?{owner_sql}",
+                (_json(data_sources), _dt(utc_now()), investigation_id, *owner_params),
             )
         return self.get_investigation(investigation_id)
 
@@ -524,9 +583,10 @@ class SQLiteInvestigationStore:
     ) -> Investigation:
         resolved = FindingStatus(status)
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             cur = conn.execute(
-                "UPDATE findings SET status = ? WHERE id = ? AND investigation_id = ?",
-                (resolved.value, finding_id, investigation_id),
+                f"UPDATE findings SET status = ? WHERE id = ? AND investigation_id = ?{owner_sql}",
+                (resolved.value, finding_id, investigation_id, *owner_params),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"Finding not found: {finding_id}")
@@ -535,9 +595,10 @@ class SQLiteInvestigationStore:
 
     def set_artifact_pinned(self, investigation_id: str, artifact_id: str, pinned: bool) -> Investigation:
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             cur = conn.execute(
-                "UPDATE artifacts SET pinned = ? WHERE id = ? AND investigation_id = ?",
-                (1 if pinned else 0, artifact_id, investigation_id),
+                f"UPDATE artifacts SET pinned = ? WHERE id = ? AND investigation_id = ?{owner_sql}",
+                (1 if pinned else 0, artifact_id, investigation_id, *owner_params),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"Artifact not found: {artifact_id}")
@@ -552,9 +613,10 @@ class SQLiteInvestigationStore:
     ) -> Investigation:
         resolved = ArtifactVisibility(visibility)
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             cur = conn.execute(
-                "UPDATE artifacts SET visibility = ? WHERE id = ? AND investigation_id = ?",
-                (resolved.value, artifact_id, investigation_id),
+                f"UPDATE artifacts SET visibility = ? WHERE id = ? AND investigation_id = ?{owner_sql}",
+                (resolved.value, artifact_id, investigation_id, *owner_params),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"Artifact not found: {artifact_id}")
@@ -574,9 +636,10 @@ class SQLiteInvestigationStore:
         current = artifact.metadata if isinstance(artifact.metadata, dict) else {}
         merged = {**current, **dict(metadata or {})}
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             cur = conn.execute(
-                "UPDATE artifacts SET metadata_json = ? WHERE id = ? AND investigation_id = ?",
-                (_json(merged), artifact_id, investigation_id),
+                f"UPDATE artifacts SET metadata_json = ? WHERE id = ? AND investigation_id = ?{owner_sql}",
+                (_json(merged), artifact_id, investigation_id, *owner_params),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"Artifact not found: {artifact_id}")
@@ -599,19 +662,28 @@ class SQLiteInvestigationStore:
 
     def get_shareable_report(self, report_id: str) -> ShareableReport:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM shareable_reports WHERE id = ?", (report_id,)).fetchone()
+            owner_sql, owner_params = self._owner_and()
+            row = conn.execute(
+                f"SELECT * FROM shareable_reports WHERE id = ?{owner_sql}",
+                (report_id, *owner_params),
+            ).fetchone()
             if row is None:
                 raise KeyError(f"ShareableReport not found: {report_id}")
             return self._shareable_report_from_row(row)
 
     def list_shareable_reports(self, investigation_id: str | None = None) -> list[ShareableReport]:
         with self._connect() as conn:
+            owner_filter_sql, owner_filter_params = self._owner_where()
+            owner_and_sql, owner_and_params = self._owner_and()
             if investigation_id is None:
-                rows = conn.execute("SELECT * FROM shareable_reports ORDER BY updated_at DESC").fetchall()
+                rows = conn.execute(
+                    f"SELECT * FROM shareable_reports{owner_filter_sql} ORDER BY updated_at DESC",
+                    owner_filter_params,
+                ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM shareable_reports WHERE investigation_id = ? ORDER BY updated_at DESC",
-                    (investigation_id,),
+                    f"SELECT * FROM shareable_reports WHERE investigation_id = ?{owner_and_sql} ORDER BY updated_at DESC",
+                    (investigation_id, *owner_and_params),
                 ).fetchall()
             return [self._shareable_report_from_row(row) for row in rows]
 
@@ -634,8 +706,9 @@ class SQLiteInvestigationStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO report_comments
-                (id, report_id, section_id, text, status, created_at, updated_at, resolved_at, author, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, report_id, section_id, text, status, created_at, updated_at, resolved_at, author, metadata_json,
+                 owner_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     comment.comment_id,
@@ -648,6 +721,7 @@ class SQLiteInvestigationStore:
                     _dt(comment.resolved_at),
                     comment.author,
                     _json(comment.metadata),
+                    self._owner_session_id(),
                 ),
             )
         return comment
@@ -655,26 +729,29 @@ class SQLiteInvestigationStore:
     def list_report_comments(self, report_id: str, section_id: str | None = None) -> list[ReportComment]:
         self.get_shareable_report(report_id)
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             if section_id is None:
                 rows = conn.execute(
-                    "SELECT * FROM report_comments WHERE report_id = ? ORDER BY created_at ASC",
-                    (report_id,),
+                    f"SELECT * FROM report_comments WHERE report_id = ?{owner_sql} ORDER BY created_at ASC",
+                    (report_id, *owner_params),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM report_comments WHERE report_id = ? AND section_id = ? ORDER BY created_at ASC",
-                    (report_id, section_id),
+                    f"SELECT * FROM report_comments WHERE report_id = ? AND section_id = ?{owner_sql} ORDER BY created_at ASC",
+                    (report_id, section_id, *owner_params),
                 ).fetchall()
             return [self._comment_from_row(row) for row in rows]
 
     def update_report_comment(self, comment: ReportComment) -> ReportComment:
         comment.updated_at = utc_now()
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             cur = conn.execute(
                 """
                 UPDATE report_comments
                 SET text = ?, status = ?, updated_at = ?, resolved_at = ?, author = ?, metadata_json = ?
                 WHERE id = ?
+                """ + owner_sql + """
                 """,
                 (
                     comment.text,
@@ -684,6 +761,7 @@ class SQLiteInvestigationStore:
                     comment.author,
                     _json(comment.metadata),
                     comment.comment_id,
+                    *owner_params,
                 ),
             )
             if cur.rowcount == 0:
@@ -693,18 +771,26 @@ class SQLiteInvestigationStore:
     def resolve_report_comment(self, comment_id: str) -> ReportComment:
         with self._connect() as conn:
             resolved_at = utc_now()
+            owner_sql, owner_params = self._owner_and()
             cur = conn.execute(
-                "UPDATE report_comments SET status = ?, resolved_at = ?, updated_at = ? WHERE id = ?",
-                (ReportCommentStatus.RESOLVED.value, _dt(resolved_at), _dt(resolved_at), comment_id),
+                f"UPDATE report_comments SET status = ?, resolved_at = ?, updated_at = ? WHERE id = ?{owner_sql}",
+                (ReportCommentStatus.RESOLVED.value, _dt(resolved_at), _dt(resolved_at), comment_id, *owner_params),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"ReportComment not found: {comment_id}")
-            row = conn.execute("SELECT * FROM report_comments WHERE id = ?", (comment_id,)).fetchone()
+            row = conn.execute(
+                f"SELECT * FROM report_comments WHERE id = ?{owner_sql}",
+                (comment_id, *owner_params),
+            ).fetchone()
             return self._comment_from_row(row)
 
     def delete_report_comment(self, comment_id: str) -> None:
         with self._connect() as conn:
-            cur = conn.execute("DELETE FROM report_comments WHERE id = ?", (comment_id,))
+            owner_sql, owner_params = self._owner_and()
+            cur = conn.execute(
+                f"DELETE FROM report_comments WHERE id = ?{owner_sql}",
+                (comment_id, *owner_params),
+            )
             if cur.rowcount == 0:
                 raise KeyError(f"ReportComment not found: {comment_id}")
 
@@ -765,7 +851,11 @@ class SQLiteInvestigationStore:
 
     def get_final_report_snapshot(self, snapshot_id: str) -> FinalReportSnapshot:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM final_report_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+            owner_sql, owner_params = self._owner_and()
+            row = conn.execute(
+                f"SELECT * FROM final_report_snapshots WHERE id = ?{owner_sql}",
+                (snapshot_id, *owner_params),
+            ).fetchone()
             if row is None:
                 raise KeyError(f"FinalReportSnapshot not found: {snapshot_id}")
             return self._final_snapshot_from_row(row)
@@ -788,6 +878,10 @@ class SQLiteInvestigationStore:
         if status is not None:
             where.append("status = ?")
             params.append(status)
+        owner_session_id = self._owner_session_id()
+        if owner_session_id is not None:
+            where.append("owner_session_id = ?")
+            params.append(owner_session_id)
         if where:
             query += " WHERE " + " AND ".join(where)
         query += " ORDER BY created_at DESC"
@@ -809,19 +903,28 @@ class SQLiteInvestigationStore:
 
     def get_data_source(self, data_source_id: str) -> DataSource:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM data_sources WHERE id = ?", (data_source_id,)).fetchone()
+            owner_sql, owner_params = self._owner_and()
+            row = conn.execute(
+                f"SELECT * FROM data_sources WHERE id = ?{owner_sql}",
+                (data_source_id, *owner_params),
+            ).fetchone()
             if row is None:
                 raise KeyError(f"DataSource not found: {data_source_id}")
             return self._data_source_from_row(row)
 
     def list_data_sources(self, status: str | None = None) -> list[DataSource]:
         with self._connect() as conn:
+            owner_where_sql, owner_where_params = self._owner_where()
+            owner_and_sql, owner_and_params = self._owner_and()
             if status is None:
-                rows = conn.execute("SELECT * FROM data_sources ORDER BY updated_at DESC").fetchall()
+                rows = conn.execute(
+                    f"SELECT * FROM data_sources{owner_where_sql} ORDER BY updated_at DESC",
+                    owner_where_params,
+                ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM data_sources WHERE status = ? ORDER BY updated_at DESC",
-                    (status,),
+                    f"SELECT * FROM data_sources WHERE status = ?{owner_and_sql} ORDER BY updated_at DESC",
+                    (status, *owner_and_params),
                 ).fetchall()
             return [self._data_source_from_row(row) for row in rows]
 
@@ -844,7 +947,8 @@ class SQLiteInvestigationStore:
         if delete_file and data_source.data_source_type == DataSourceType.CSV:
             file_deleted = delete_uploaded_file_if_safe(data_source.location)
         with self._connect() as conn:
-            investigations = conn.execute("SELECT * FROM investigations").fetchall()
+            owner_sql, owner_params = self._owner_where()
+            investigations = conn.execute(f"SELECT * FROM investigations{owner_sql}", owner_params).fetchall()
             for row in investigations:
                 linked_ids = [
                     item for item in _loads(row["linked_data_source_ids_json"], []) if item != data_source_id
@@ -861,7 +965,11 @@ class SQLiteInvestigationStore:
                         """,
                         (_json(linked_ids), _json(data_sources), _dt(utc_now()), row["id"]),
                     )
-            conn.execute("DELETE FROM data_sources WHERE id = ?", (data_source_id,))
+            owner_and_sql, owner_and_params = self._owner_and()
+            conn.execute(
+                f"DELETE FROM data_sources WHERE id = ?{owner_and_sql}",
+                (data_source_id, *owner_and_params),
+            )
         return file_deleted
 
     def save_data_source_profile(self, data_source_id: str, profile: DataSourceProfile) -> DataSourceProfile:
@@ -904,19 +1012,25 @@ class SQLiteInvestigationStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO data_source_profiles
-                (data_source_id, profile_json, generated_at)
-                VALUES (?, ?, ?)
+                (data_source_id, profile_json, generated_at, owner_session_id)
+                VALUES (?, ?, ?, ?)
                 """,
-                (data_source_id, _json(_profile_to_dict(profile)), _dt(profile.generated_at)),
+                (
+                    data_source_id,
+                    _json(_profile_to_dict(profile)),
+                    _dt(profile.generated_at),
+                    self._owner_session_id(),
+                ),
             )
         return profile
 
     def get_data_source_profile(self, data_source_id: str) -> DataSourceProfile:
         self.get_data_source(data_source_id)
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             row = conn.execute(
-                "SELECT * FROM data_source_profiles WHERE data_source_id = ?",
-                (data_source_id,),
+                f"SELECT * FROM data_source_profiles WHERE data_source_id = ?{owner_sql}",
+                (data_source_id, *owner_params),
             ).fetchone()
             if row is None:
                 raise KeyError(f"DataSourceProfile not found: {data_source_id}")
@@ -925,9 +1039,10 @@ class SQLiteInvestigationStore:
     def get_data_source_semantic_notes(self, data_source_id: str) -> DataSourceSemanticNotes:
         self.get_data_source(data_source_id)
         with self._connect() as conn:
+            owner_sql, owner_params = self._owner_and()
             row = conn.execute(
-                "SELECT * FROM data_source_semantic_notes WHERE data_source_id = ?",
-                (data_source_id,),
+                f"SELECT * FROM data_source_semantic_notes WHERE data_source_id = ?{owner_sql}",
+                (data_source_id, *owner_params),
             ).fetchone()
             if row is None:
                 return DataSourceSemanticNotes(data_source_id=data_source_id)
@@ -942,10 +1057,15 @@ class SQLiteInvestigationStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO data_source_semantic_notes
-                (data_source_id, notes_json, updated_at)
-                VALUES (?, ?, ?)
+                (data_source_id, notes_json, updated_at, owner_session_id)
+                VALUES (?, ?, ?, ?)
                 """,
-                (notes.data_source_id, _json(_semantic_notes_to_dict(notes)), _dt(notes.updated_at)),
+                (
+                    notes.data_source_id,
+                    _json(_semantic_notes_to_dict(notes)),
+                    _dt(notes.updated_at),
+                    self._owner_session_id(),
+                ),
             )
         return self.get_data_source_semantic_notes(notes.data_source_id)
 
@@ -977,14 +1097,30 @@ class SQLiteInvestigationStore:
             apply_migrations(conn)
 
     @staticmethod
+    def _owner_session_id() -> str | None:
+        return get_current_session_id()
+
+    @classmethod
+    def _owner_where(cls, prefix: str = "WHERE") -> tuple[str, tuple[str, ...]]:
+        owner_session_id = cls._owner_session_id()
+        if owner_session_id is None:
+            return "", ()
+        return f" {prefix} owner_session_id = ?", (owner_session_id,)
+
+    @classmethod
+    def _owner_and(cls) -> tuple[str, tuple[str, ...]]:
+        return cls._owner_where("AND")
+
+    @staticmethod
     def _upsert_shareable_report(conn: sqlite3.Connection, report: ShareableReport) -> None:
         conn.execute(
             """
             INSERT OR REPLACE INTO shareable_reports
             (id, investigation_id, title, template, status, version, created_at, updated_at,
              sections_json, source_finding_ids_json, source_artifact_ids_json, include_technical, metadata_json,
-             previous_version_id, is_latest, version_note, approval_status, reviewer_notes, approved_at, approved_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             previous_version_id, is_latest, version_note, approval_status, reviewer_notes, approved_at, approved_by,
+             owner_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 report.report_id,
@@ -1007,6 +1143,7 @@ class SQLiteInvestigationStore:
                 report.reviewer_notes,
                 _dt(report.approved_at),
                 report.approved_by,
+                SQLiteInvestigationStore._owner_session_id(),
             ),
         )
 
@@ -1017,8 +1154,8 @@ class SQLiteInvestigationStore:
             INSERT OR REPLACE INTO final_report_snapshots
             (id, report_id, investigation_id, report_version, title, created_at, created_by, status,
              markdown_content, html_content, txt_content, readiness_snapshot_json, approval_status, approved_at,
-             approved_by, source_report_json, metadata_json, decision_metadata_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             approved_by, source_report_json, metadata_json, decision_metadata_json, owner_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snapshot.snapshot_id,
@@ -1039,6 +1176,7 @@ class SQLiteInvestigationStore:
                 _json(snapshot.source_report_json),
                 _json(snapshot.metadata),
                 _json(_decision_metadata_to_dict(snapshot.decision_metadata)),
+                SQLiteInvestigationStore._owner_session_id(),
             ),
         )
 
@@ -1048,8 +1186,8 @@ class SQLiteInvestigationStore:
             """
             INSERT INTO data_sources
             (id, name, type, created_at, updated_at, status, location, description,
-             tags_json, linked_investigation_ids_json, metadata_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             tags_json, linked_investigation_ids_json, metadata_json, owner_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 type = excluded.type,
@@ -1059,7 +1197,8 @@ class SQLiteInvestigationStore:
                 description = excluded.description,
                 tags_json = excluded.tags_json,
                 linked_investigation_ids_json = excluded.linked_investigation_ids_json,
-                metadata_json = excluded.metadata_json
+                metadata_json = excluded.metadata_json,
+                owner_session_id = COALESCE(data_sources.owner_session_id, excluded.owner_session_id)
             """,
             (
                 data_source.data_source_id,
@@ -1073,6 +1212,7 @@ class SQLiteInvestigationStore:
                 _json(data_source.tags),
                 _json(data_source.linked_investigation_ids),
                 _json(data_source.metadata),
+                SQLiteInvestigationStore._owner_session_id(),
             ),
         )
 
@@ -1081,8 +1221,9 @@ class SQLiteInvestigationStore:
         conn.execute(
             """
             INSERT OR REPLACE INTO investigation_memory
-            (id, investigation_id, type, title, content, status, created_at, updated_at, metadata_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, investigation_id, type, title, content, status, created_at, updated_at, metadata_json,
+             owner_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item.memory_id,
@@ -1094,6 +1235,7 @@ class SQLiteInvestigationStore:
                 _dt(item.created_at),
                 _dt(item.updated_at),
                 _json(item.metadata),
+                SQLiteInvestigationStore._owner_session_id(),
             ),
         )
 
@@ -1104,8 +1246,8 @@ class SQLiteInvestigationStore:
             INSERT OR REPLACE INTO investigation_runs
             (id, investigation_id, created_at, started_at, completed_at, status, current_stage,
              data_source_ids_json, run_context_summary_json, error_message,
-             artifact_ids_json, report_ids_json, metadata_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             artifact_ids_json, report_ids_json, metadata_json, owner_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run.run_id,
@@ -1121,11 +1263,13 @@ class SQLiteInvestigationStore:
                 _json(run.artifact_ids),
                 _json(run.report_ids),
                 _json(run.metadata),
+                SQLiteInvestigationStore._owner_session_id(),
             ),
         )
 
     def _list_report_versions_conn(self, conn: sqlite3.Connection, report_id: str) -> list[ShareableReport]:
-        rows = conn.execute("SELECT * FROM shareable_reports").fetchall()
+        owner_sql, owner_params = self._owner_where()
+        rows = conn.execute(f"SELECT * FROM shareable_reports{owner_sql}", owner_params).fetchall()
         reports = [self._shareable_report_from_row(row) for row in rows]
         by_id = {report.report_id: report for report in reports}
         if report_id not in by_id:
@@ -1157,28 +1301,29 @@ class SQLiteInvestigationStore:
             updated_at=_parse_dt(row["updated_at"]),
             metadata=_loads(row["metadata_json"], {}),
         )
+        owner_sql, owner_params = self._owner_and()
         run_rows = conn.execute(
-            "SELECT * FROM runs WHERE investigation_id = ? ORDER BY started_at ASC",
-            (investigation.investigation_id,),
+            f"SELECT * FROM runs WHERE investigation_id = ?{owner_sql} ORDER BY started_at ASC",
+            (investigation.investigation_id, *owner_params),
         ).fetchall()
         investigation.runs = [self._run_from_row(item) for item in run_rows]
         investigation.trace = [event for run in investigation.runs for event in run.trace]
 
         artifact_rows = conn.execute(
-            "SELECT * FROM artifacts WHERE investigation_id = ? ORDER BY pinned DESC, created_at ASC",
-            (investigation.investigation_id,),
+            f"SELECT * FROM artifacts WHERE investigation_id = ?{owner_sql} ORDER BY pinned DESC, created_at ASC",
+            (investigation.investigation_id, *owner_params),
         ).fetchall()
         investigation.artifacts = [self._artifact_from_row(item) for item in artifact_rows]
 
         finding_rows = conn.execute(
-            "SELECT * FROM findings WHERE investigation_id = ? ORDER BY created_at ASC",
-            (investigation.investigation_id,),
+            f"SELECT * FROM findings WHERE investigation_id = ?{owner_sql} ORDER BY created_at ASC",
+            (investigation.investigation_id, *owner_params),
         ).fetchall()
         investigation.findings = [self._finding_from_row(item) for item in finding_rows]
 
         report_row = conn.execute(
-            "SELECT * FROM reports WHERE investigation_id = ? ORDER BY created_at DESC LIMIT 1",
-            (investigation.investigation_id,),
+            f"SELECT * FROM reports WHERE investigation_id = ?{owner_sql} ORDER BY created_at DESC LIMIT 1",
+            (investigation.investigation_id, *owner_params),
         ).fetchone()
         investigation.report = self._report_from_row(report_row) if report_row else None
         return investigation
@@ -1401,10 +1546,16 @@ class SQLiteInvestigationStore:
         investigation_id: str,
         status: str | None = None,
     ) -> None:
+        owner_session_id = get_current_session_id()
+        owner_sql = " AND owner_session_id = ?" if owner_session_id is not None else ""
+        owner_params = (owner_session_id,) if owner_session_id is not None else ()
         if status is None:
-            conn.execute("UPDATE investigations SET updated_at = ? WHERE id = ?", (_dt(utc_now()), investigation_id))
+            conn.execute(
+                "UPDATE investigations SET updated_at = ? WHERE id = ?" + owner_sql,
+                (_dt(utc_now()), investigation_id, *owner_params),
+            )
         else:
             conn.execute(
-                "UPDATE investigations SET status = ?, updated_at = ? WHERE id = ?",
-                (status, _dt(utc_now()), investigation_id),
+                "UPDATE investigations SET status = ?, updated_at = ? WHERE id = ?" + owner_sql,
+                (status, _dt(utc_now()), investigation_id, *owner_params),
             )

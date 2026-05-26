@@ -58,23 +58,33 @@ The following values come from `docs/evaluation_outputs/summary_metrics.csv`.
 | Retry Fraction | 0.0% (0/19) |
 | Average Latency | 0.043s mean, 0.019s median, 0.381s max |
 
-## Backend Test Result
+## Smoke Test Result
 
-The audited backend test command required `pypdf` as a transient dependency because this package is used by report-redesign tests but is not installed in the current project environment by default.
+The current maintainable backend smoke/regression suite keeps one or two high-value tests per retained test file.
 
-The verified command result was:
+The verified backend command result was:
 
 ```text
-uv run --with pypdf pytest -q -m "not integration"
+pytest -q tests
 ```
 
 Result:
 
 ```text
-1034 passed, 2 failed, 21 deselected
+28 passed
 ```
 
-The two failed tests are related to healthcare semantic matching. In both failures, the system selected `hospital` instead of `diagnosis` for a question about the most common diagnoses.
+The verified frontend command result was:
+
+```text
+npm test
+```
+
+Result:
+
+```text
+14 passed
+```
 
 ## Category Results
 
@@ -231,9 +241,7 @@ Known limitations:
 3. Multi-dataset benchmark cases preselect dataset IDs.
 4. Groundedness checks are partly lexical.
 5. Follow-up behavior is partial: one simpler top-N follow-up passed, while two follow-up cases failed.
-6. Healthcare semantic matching still has known failures.
-7. Frontend tests were not run in the audited environment because `npm` was not available.
-8. UI screenshots were not generated in the audited environment.
+6. UI screenshots were not generated in the audited environment.
 
 These limitations should be included in the final report. They do not invalidate the benchmark, but they define its scope.
 

@@ -10,6 +10,8 @@ import { isHighConfidenceKeyFinding } from "@/lib/display";
 import { productInvestigations } from "@/lib/investigations";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function DashboardPage() {
   const [investigations, dataSources] = await Promise.all([

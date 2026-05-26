@@ -5,6 +5,8 @@ import { UploadCsvDataSourceForm } from "@/components/UploadCsvDataSourceForm";
 import { Button, Card, EmptyState, StatusBadge, formatDate } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function DataSourcesPage() {
   const sources = await listDataSources();

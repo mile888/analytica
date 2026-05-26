@@ -13,7 +13,10 @@ function getApiBaseUrl() {
   return publicUrl || SAME_ORIGIN_API_BASE;
 }
 
-type FetchOptions = RequestInit & { query?: Record<string, string | number | boolean | undefined | null> };
+type FetchOptions = RequestInit & {
+  query?: Record<string, string | number | boolean | undefined | null>;
+  next?: { revalidate?: number };
+};
 
 export class ApiError extends Error {
   status: number;
@@ -51,19 +54,34 @@ export function buildApiUrl(
   return url.toString();
 }
 
+async function getServerCookieHeader() {
+  if (typeof window !== "undefined") return "";
+  try {
+    const nextHeaders = await import("next/headers");
+    const requestHeaders = await nextHeaders.headers();
+    return requestHeaders.get("cookie") || "";
+  } catch {
+    return "";
+  }
+}
+
 export function reportPdfDownloadUrl(reportId: string) {
   return buildApiUrl(`/reports/${reportId}/download/pdf`, {}, getPublicApiBaseUrl() || SAME_ORIGIN_API_BASE);
 }
 
 export async function apiFetch<T>(path: string, options: FetchOptions = {}): Promise<T> {
   const url = buildApiUrl(path, options.query);
+  const serverCookie = await getServerCookieHeader();
   const response = await fetch(url.toString(), {
     ...options,
     headers: {
       "Content-Type": "application/json",
+      ...(serverCookie ? { Cookie: serverCookie } : {}),
       ...(options.headers || {})
     },
-    cache: "no-store"
+    cache: "no-store",
+    next: { revalidate: 0, ...(options.next || {}) },
+    credentials: "include"
   });
   if (!response.ok) {
     throw new ApiError(response.status, await response.text());
@@ -768,10 +786,14 @@ export async function uploadCsvDataSource(payload: UploadCsvDataSourcePayload) {
   formData.set("file", payload.file);
   if (payload.name) formData.set("name", payload.name);
   if (payload.description) formData.set("description", payload.description);
+  const serverCookie = await getServerCookieHeader();
   const response = await fetch(buildApiUrl("/data-sources/upload-csv"), {
     method: "POST",
+    ...(serverCookie ? { headers: { Cookie: serverCookie } } : {}),
     body: formData,
-    cache: "no-store"
+    cache: "no-store",
+    next: { revalidate: 0 },
+    credentials: "include"
   });
   if (!response.ok) {
     const body = await response.text();

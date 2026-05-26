@@ -278,6 +278,14 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         """,
     ),
+    (
+        15,
+        "session_workspace_isolation",
+        """
+        -- Applied through _add_column_if_missing because SQLite cannot
+        -- run ALTER TABLE ADD COLUMN idempotently.
+        """,
+    ),
 ]
 
 
@@ -323,12 +331,38 @@ def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     if column.lower() not in _column_names(conn, table):
-        conn.execute(f"ALTER TABLE {_quote_identifier(table)} ADD COLUMN {definition}")
+        try:
+            conn.execute(f"ALTER TABLE {_quote_identifier(table)} ADD COLUMN {definition}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 def _apply_migration(conn: sqlite3.Connection, version: int, sql: str) -> None:
-    if version not in {3, 4, 7, 8, 13}:
+    if version not in {3, 4, 7, 8, 13, 15}:
         conn.executescript(sql)
+        return
+
+    if version == 15:
+        for table in (
+            "investigations",
+            "runs",
+            "artifacts",
+            "findings",
+            "reports",
+            "shareable_reports",
+            "report_comments",
+            "final_report_snapshots",
+            "data_sources",
+            "data_source_profiles",
+            "data_source_semantic_notes",
+            "investigation_runs",
+            "investigation_run_events",
+            "investigation_messages",
+            "investigation_memory",
+        ):
+            if _table_exists(conn, table):
+                _add_column_if_missing(conn, table, "owner_session_id", "owner_session_id TEXT")
         return
 
     if version == 13:

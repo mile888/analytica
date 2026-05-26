@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from source.api.session import get_current_session_id
 from source.product.investigation import (
     Artifact,
     ArtifactVisibility,
@@ -58,11 +59,29 @@ class InvestigationStore:
         self._data_sources: dict[str, DataSource] = {}
         self._data_source_profiles: dict[str, DataSourceProfile] = {}
         self._data_source_semantic_notes: dict[str, DataSourceSemanticNotes] = {}
+        self._owners: dict[str, dict[str, str | None]] = {
+            "investigations": {},
+            "shareable_reports": {},
+            "report_comments": {},
+            "final_report_snapshots": {},
+            "investigation_runs": {},
+            "investigation_run_events": {},
+            "investigation_messages": {},
+            "investigation_memory": {},
+            "data_sources": {},
+            "data_source_profiles": {},
+            "data_source_semantic_notes": {},
+            "runs": {},
+            "artifacts": {},
+            "findings": {},
+            "reports": {},
+        }
 
     def create_investigation(self, question: str, title: Optional[str] = None) -> Investigation:
         resolved_title = title or self._title_from_question(question)
         investigation = Investigation(title=resolved_title, user_question=question)
         self._investigations[investigation.investigation_id] = investigation
+        self._set_owner("investigations", investigation.investigation_id)
         return investigation
 
     def link_data_source_to_investigation(self, investigation_id: str, data_source_id: str) -> Investigation:
@@ -79,13 +98,22 @@ class InvestigationStore:
         return investigation
 
     def get_investigation(self, investigation_id: str) -> Investigation:
+        self._require_owner("investigations", investigation_id)
         try:
             return self._investigations[investigation_id]
         except KeyError as exc:
             raise KeyError(f"Investigation not found: {investigation_id}") from exc
 
     def list_investigations(self) -> list[Investigation]:
-        return sorted(self._investigations.values(), key=lambda item: item.updated_at, reverse=True)
+        return sorted(
+            [
+                item
+                for item in self._investigations.values()
+                if self._matches_owner("investigations", item.investigation_id)
+            ],
+            key=lambda item: item.updated_at,
+            reverse=True,
+        )
 
     def update_status(self, investigation_id: str, status: InvestigationStatus | str) -> Investigation:
         investigation = self.get_investigation(investigation_id)
@@ -148,6 +176,7 @@ class InvestigationStore:
         self.get_investigation(run.investigation_id)
         run.status = InvestigationRunStatus(run.status)
         self._investigation_runs[run.run_id] = run
+        self._set_owner("investigation_runs", run.run_id)
         return run
 
     def update_investigation_run(self, run: InvestigationRun) -> InvestigationRun:
@@ -158,13 +187,22 @@ class InvestigationStore:
         return run
 
     def get_investigation_run(self, run_id: str) -> InvestigationRun:
+        self._require_owner("investigation_runs", run_id)
         try:
             return self._investigation_runs[run_id]
         except KeyError as exc:
             raise KeyError(f"InvestigationRun not found: {run_id}") from exc
 
     def list_investigation_runs(self) -> list[InvestigationRun]:
-        return sorted(self._investigation_runs.values(), key=lambda item: item.created_at, reverse=True)
+        return sorted(
+            [
+                item
+                for item in self._investigation_runs.values()
+                if self._matches_owner("investigation_runs", item.run_id)
+            ],
+            key=lambda item: item.created_at,
+            reverse=True,
+        )
 
     def list_runs_for_investigation(self, investigation_id: str) -> list[InvestigationRun]:
         self.get_investigation(investigation_id)
@@ -178,6 +216,7 @@ class InvestigationStore:
         self.get_investigation_run(event.run_id)
         self.get_investigation(event.investigation_id)
         self._investigation_run_events[event.event_id] = event
+        self._set_owner("investigation_run_events", event.event_id)
         return event
 
     def list_investigation_run_events(self, run_id: str) -> list[InvestigationRunEvent]:
@@ -210,6 +249,7 @@ class InvestigationStore:
         message.role = InvestigationMessageRole(message.role)
         message.message_type = InvestigationMessageType(message.message_type)
         self._investigation_messages[message.message_id] = message
+        self._set_owner("investigation_messages", message.message_id)
         self._touch(self.get_investigation(message.investigation_id))
         return message
 
@@ -230,6 +270,7 @@ class InvestigationStore:
         return messages[-limit:] if limit else messages
 
     def get_investigation_message(self, message_id: str) -> InvestigationMessage:
+        self._require_owner("investigation_messages", message_id)
         try:
             return self._investigation_messages[message_id]
         except KeyError as exc:
@@ -241,6 +282,7 @@ class InvestigationStore:
         item.status = InvestigationMemoryStatus(item.status)
         item.updated_at = utc_now()
         self._investigation_memory[item.memory_id] = item
+        self._set_owner("investigation_memory", item.memory_id)
         self._touch(self.get_investigation(item.investigation_id))
         return item
 
@@ -257,6 +299,7 @@ class InvestigationStore:
         return sorted(items, key=lambda item: item.updated_at, reverse=True)
 
     def get_investigation_memory_item(self, memory_id: str) -> InvestigationMemoryItem:
+        self._require_owner("investigation_memory", memory_id)
         try:
             return self._investigation_memory[memory_id]
         except KeyError as exc:
@@ -347,9 +390,11 @@ class InvestigationStore:
                 for existing in self.list_report_versions(anchor_id):
                     existing.is_latest = False
         self._shareable_reports[report.report_id] = report
+        self._set_owner("shareable_reports", report.report_id)
         return report
 
     def get_shareable_report(self, report_id: str) -> ShareableReport:
+        self._require_owner("shareable_reports", report_id)
         try:
             return self._shareable_reports[report_id]
         except KeyError as exc:
@@ -357,6 +402,11 @@ class InvestigationStore:
 
     def list_shareable_reports(self, investigation_id: str | None = None) -> list[ShareableReport]:
         reports = list(self._shareable_reports.values())
+        reports = [
+            report
+            for report in reports
+            if self._matches_owner("shareable_reports", report.report_id)
+        ]
         if investigation_id is not None:
             reports = [report for report in reports if report.investigation_id == investigation_id]
         return sorted(reports, key=lambda item: item.updated_at, reverse=True)
@@ -377,6 +427,7 @@ class InvestigationStore:
     def add_report_comment(self, comment: ReportComment) -> ReportComment:
         self.get_shareable_report(comment.report_id)
         self._report_comments[comment.comment_id] = comment
+        self._set_owner("report_comments", comment.comment_id)
         return comment
 
     def list_report_comments(self, report_id: str, section_id: str | None = None) -> list[ReportComment]:
@@ -387,6 +438,7 @@ class InvestigationStore:
         return sorted(comments, key=lambda item: item.created_at)
 
     def update_report_comment(self, comment: ReportComment) -> ReportComment:
+        self._require_owner("report_comments", comment.comment_id)
         if comment.comment_id not in self._report_comments:
             raise KeyError(f"ReportComment not found: {comment.comment_id}")
         comment.updated_at = utc_now()
@@ -394,6 +446,7 @@ class InvestigationStore:
         return comment
 
     def resolve_report_comment(self, comment_id: str) -> ReportComment:
+        self._require_owner("report_comments", comment_id)
         try:
             comment = self._report_comments[comment_id]
         except KeyError as exc:
@@ -405,6 +458,7 @@ class InvestigationStore:
         return comment
 
     def delete_report_comment(self, comment_id: str) -> None:
+        self._require_owner("report_comments", comment_id)
         if comment_id not in self._report_comments:
             raise KeyError(f"ReportComment not found: {comment_id}")
         del self._report_comments[comment_id]
@@ -462,9 +516,11 @@ class InvestigationStore:
     def create_final_report_snapshot(self, snapshot: FinalReportSnapshot) -> FinalReportSnapshot:
         self.get_shareable_report(snapshot.report_id)
         self._final_report_snapshots[snapshot.snapshot_id] = snapshot
+        self._set_owner("final_report_snapshots", snapshot.snapshot_id)
         return snapshot
 
     def get_final_report_snapshot(self, snapshot_id: str) -> FinalReportSnapshot:
+        self._require_owner("final_report_snapshots", snapshot_id)
         try:
             return self._final_report_snapshots[snapshot_id]
         except KeyError as exc:
@@ -477,6 +533,11 @@ class InvestigationStore:
         status: str | None = None,
     ) -> list[FinalReportSnapshot]:
         snapshots = list(self._final_report_snapshots.values())
+        snapshots = [
+            snapshot
+            for snapshot in snapshots
+            if self._matches_owner("final_report_snapshots", snapshot.snapshot_id)
+        ]
         if report_id is not None:
             snapshots = [snapshot for snapshot in snapshots if snapshot.report_id == report_id]
         if investigation_id is not None:
@@ -493,9 +554,11 @@ class InvestigationStore:
     def create_data_source(self, data_source: DataSource) -> DataSource:
         data_source.tags = _normalize_tags(data_source.tags)
         self._data_sources[data_source.data_source_id] = data_source
+        self._set_owner("data_sources", data_source.data_source_id)
         return data_source
 
     def get_data_source(self, data_source_id: str) -> DataSource:
+        self._require_owner("data_sources", data_source_id)
         try:
             return self._data_sources[data_source_id]
         except KeyError as exc:
@@ -503,6 +566,11 @@ class InvestigationStore:
 
     def list_data_sources(self, status: str | None = None) -> list[DataSource]:
         sources = list(self._data_sources.values())
+        sources = [
+            source
+            for source in sources
+            if self._matches_owner("data_sources", source.data_source_id)
+        ]
         if status is not None:
             sources = [source for source in sources if source.status.value == status]
         return sorted(sources, key=lambda item: item.updated_at, reverse=True)
@@ -573,10 +641,12 @@ class InvestigationStore:
                 },
             )
         self._data_source_profiles[data_source_id] = profile
+        self._set_owner("data_source_profiles", data_source_id)
         return profile
 
     def get_data_source_profile(self, data_source_id: str) -> DataSourceProfile:
         self.get_data_source(data_source_id)
+        self._require_owner("data_source_profiles", data_source_id)
         try:
             return self._data_source_profiles[data_source_id]
         except KeyError as exc:
@@ -595,6 +665,7 @@ class InvestigationStore:
         notes.global_caveats = _clean_list(notes.global_caveats)
         notes.updated_at = utc_now()
         self._data_source_semantic_notes[notes.data_source_id] = notes
+        self._set_owner("data_source_semantic_notes", notes.data_source_id)
         return notes
 
     def update_column_semantic_note(
@@ -634,6 +705,7 @@ class InvestigationStore:
     def add_run(self, investigation_id: str, run: InvestigationRun) -> Investigation:
         investigation = self.get_investigation(investigation_id)
         investigation.runs.append(run)
+        self._set_owner("runs", run.run_id)
         if run.trace:
             investigation.trace.extend(run.trace)
         self._touch(investigation)
@@ -642,12 +714,14 @@ class InvestigationStore:
     def add_artifact(self, investigation_id: str, artifact: Artifact) -> Investigation:
         investigation = self.get_investigation(investigation_id)
         investigation.artifacts.append(artifact)
+        self._set_owner("artifacts", artifact.artifact_id)
         self._touch(investigation)
         return investigation
 
     def add_finding(self, investigation_id: str, finding: Finding) -> Investigation:
         investigation = self.get_investigation(investigation_id)
         investigation.findings.append(finding)
+        self._set_owner("findings", finding.finding_id)
         self._touch(investigation)
         return investigation
 
@@ -682,6 +756,7 @@ class InvestigationStore:
         investigation = self.get_investigation(investigation_id)
         report.updated_at = utc_now()
         investigation.report = report
+        self._set_owner("reports", report.report_id)
         self._touch(investigation)
         return investigation
 
@@ -701,6 +776,23 @@ class InvestigationStore:
     @staticmethod
     def _touch(investigation: Investigation) -> None:
         investigation.updated_at = utc_now()
+
+    @staticmethod
+    def _owner_session_id() -> str | None:
+        return get_current_session_id()
+
+    def _set_owner(self, collection: str, item_id: str, owner_session_id: str | None = None) -> None:
+        self._owners.setdefault(collection, {})[item_id] = owner_session_id if owner_session_id is not None else self._owner_session_id()
+
+    def _matches_owner(self, collection: str, item_id: str) -> bool:
+        owner_session_id = self._owner_session_id()
+        if owner_session_id is None:
+            return True
+        return self._owners.get(collection, {}).get(item_id) == owner_session_id
+
+    def _require_owner(self, collection: str, item_id: str) -> None:
+        if not self._matches_owner(collection, item_id):
+            raise KeyError(f"{collection} not found: {item_id}")
 
 
 def _normalize_tags(tags: list[str]) -> list[str]:

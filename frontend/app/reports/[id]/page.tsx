@@ -14,6 +14,8 @@ import { ReportViewModeToggle } from "@/components/ReportViewModeToggle";
 import { Card, StatusBadge, formatDate } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function ReportDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;

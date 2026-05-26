@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from source.config import CORS_ORIGINS
+from source.api.session import SessionCookieMiddleware
 from source.api.routes.data_sources import router as data_sources_router
 from source.api.routes.final_reports import router as final_reports_router
 from source.api.routes.investigations import router as investigations_router, runs_router
@@ -15,10 +16,11 @@ from source.api.routes.reports import router as reports_router
 logger = logging.getLogger("analytica.api")
 
 app = FastAPI(title="Analytica Product API")
+app.add_middleware(SessionCookieMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(CORS_ORIGINS),
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

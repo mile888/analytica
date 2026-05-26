@@ -3,6 +3,8 @@ import { listFinalSnapshotsForReport, listInvestigations, listReportsForInvestig
 import { Card, formatDate } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function ReportsPage() {
   const investigations = await listInvestigations();

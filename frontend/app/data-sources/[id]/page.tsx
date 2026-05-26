@@ -4,6 +4,8 @@ import { DeleteDataSourceAction } from "@/components/DeleteActions";
 import { Card, EmptyState, StatusBadge, formatDate } from "@/components/ui";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function DataSourceDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
