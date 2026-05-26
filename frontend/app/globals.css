@@ -1,0 +1,238 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --app-bg: #f8fafc;
+  --app-text: #111827;
+}
+
+.dark {
+  color-scheme: dark;
+  --app-bg: #020617;
+  --app-text: #e5e7eb;
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--app-text);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.editor-button,
+.editor-button-danger {
+  border-radius: 0.375rem;
+  border: 1px solid #cbd5e1;
+  padding: 0.375rem 0.625rem;
+  font-weight: 500;
+  color: #475569;
+}
+
+.editor-button:hover {
+  background: #f8fafc;
+}
+
+.editor-button:disabled,
+.editor-button-danger:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.editor-button-danger {
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.editor-button-danger:hover {
+  background: #fef2f2;
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 0.5rem;
+  background: #e2e8f0;
+}
+
+.dark .skeleton {
+  background: #1e293b;
+}
+
+.skeleton::after {
+  animation: shimmer 1.4s infinite;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.35), transparent);
+  content: "";
+  inset: 0;
+  position: absolute;
+  transform: translateX(-100%);
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.dark .bg-white {
+  background-color: #0f172a;
+}
+
+.dark .bg-slate-50,
+.dark .bg-slate-100 {
+  background-color: #111827;
+}
+
+.dark .border-slate-100,
+.dark .border-slate-200,
+.dark .border-slate-300 {
+  border-color: #334155;
+}
+
+.dark .text-ink,
+.dark .text-slate-950,
+.dark .text-slate-900,
+.dark .text-slate-800,
+.dark .text-slate-700 {
+  color: #f8fafc;
+}
+
+.dark .text-muted,
+.dark .text-slate-600,
+.dark .text-slate-500 {
+  color: #cbd5e1;
+}
+
+.dark input,
+.dark textarea,
+.dark select {
+  background: #020617;
+  border-color: #475569;
+  color: #f8fafc;
+}
+
+.dark table {
+  color: #e5e7eb;
+}
+
+.dark .editor-button:hover {
+  background: #1e293b;
+}
+
+.dark .editor-button {
+  border-color: #475569;
+  color: #cbd5e1;
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+
+  .no-print,
+  .print-hidden,
+  .final-report-detail-shell header,
+  .final-report-detail-shell aside {
+    display: none !important;
+  }
+
+  .final-report-detail-shell {
+    display: block;
+  }
+
+  main {
+    padding: 0 !important;
+  }
+
+  .print-report {
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+
+  .final-report-html-preview {
+    height: 95vh !important;
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Mobile & Tablet Responsiveness
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Touch-friendly minimum tap targets */
+@media (max-width: 768px) {
+  button,
+  [role="button"],
+  a {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Stack investigation grid vertically */
+  .grid.xl\:grid-cols-\[320px_minmax\(0\,1fr\)_360px\] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Responsive chart containers */
+  .recharts-wrapper,
+  .chart-container,
+  svg.recharts-surface {
+    max-width: 100% !important;
+    overflow-x: auto;
+  }
+
+  /* Scrollable tables on mobile */
+  table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Prevent horizontal overflow */
+  pre, code {
+    max-width: 100%;
+    overflow-x: auto;
+    word-break: break-word;
+  }
+
+  /* Compact padding for cards */
+  .rounded-2xl {
+    border-radius: 1rem;
+  }
+
+  /* Better spacing for findings cards */
+  .space-y-4 > * + * {
+    margin-top: 0.75rem;
+  }
+}
+
+/* Tablet tweaks (768px - 1024px) */
+@media (min-width: 768px) and (max-width: 1024px) {
+  .grid.xl\:grid-cols-\[320px_minmax\(0\,1fr\)_360px\] {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Ensure charts and images never overflow their containers */
+img, svg, canvas, video {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Smooth scrolling for mobile */
+html {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+
+/* Prevent zoom on input focus (iOS) */
+@media (max-width: 768px) {
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+}

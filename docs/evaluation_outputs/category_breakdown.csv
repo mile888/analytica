@@ -1,0 +1,11 @@
+category,cases,e2e_success_count,analytical_correct_count,analytical_correct_rate
+basic grouped aggregation,2,2,2,1.0
+business KPI analysis,3,3,3,1.0
+follow-up correction,1,1,0,0.0
+health risk analysis,2,2,1,0.5
+multi-dataset comparison,3,3,3,1.0
+negative incompatible request,1,1,1,1.0
+outlier analysis,1,1,1,1.0
+relationship analysis,2,2,2,1.0
+trend analysis,1,1,1,1.0
+visualization request,1,1,1,1.0
